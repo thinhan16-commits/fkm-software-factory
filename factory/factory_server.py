@@ -221,7 +221,7 @@ async def serve_service_worker():
     return FileResponse(
         os.path.join(STATIC_DIR, "sw.js"),
         media_type="application/javascript",
-        headers={"Cache-Control": "no-cache"},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
     )
 
 

@@ -892,26 +892,39 @@
     /* Gemini Mobile Greeting & Quick Chips */
     .gemini-mobile-hero {
       display: none;
-      width: 100%;
-      max-width: 780px;
-      padding: 12px 4px 6px;
+      width: 100% !important;
+      max-width: 820px !important;
+      min-width: 0 !important;
+      box-sizing: border-box !important;
+      padding: 12px 14px 8px !important;
       flex-direction: column;
-      gap: 10px;
+      gap: 8px;
+      align-self: stretch !important;
     }
     .gemini-greeting-title {
-      font-size: 25px;
+      font-size: 24px;
       font-weight: 700;
-      line-height: 1.25;
+      line-height: 1.35;
+      white-space: normal !important;
+      word-break: normal !important;
+      overflow-wrap: break-word !important;
       background: var(--gemini-gradient);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
       letter-spacing: -0.3px;
+      width: 100%;
+      text-align: left;
     }
     .gemini-greeting-sub {
-      font-size: 18px;
-      font-weight: 600;
-      color: #8e9196;
-      margin-top: -4px;
+      font-size: 16px;
+      font-weight: 500;
+      color: #9aa0a6;
+      white-space: normal !important;
+      word-break: normal !important;
+      overflow-wrap: break-word !important;
+      margin-top: 2px;
+      width: 100%;
+      text-align: left;
     }
     .gemini-quick-chips {
       display: flex;
@@ -3704,7 +3717,11 @@
       /* Ẩn thanh dọc bên phải trên mobile vì đã gom hết vào Icon Tròn Góc Phải Dropdown! */
       .right-role-rail { display: none !important; }
 
-      .gemini-mobile-hero { display: flex; }
+      .gemini-mobile-hero {
+        display: flex !important;
+        width: 100% !important;
+        align-self: stretch !important;
+      }
 
       .conversation-scroll {
         padding: 6px 14px 14px;
@@ -3960,7 +3977,11 @@
     }
     body.mobile-preview-mode .gemini-center-pill { display: inline-flex; }
     body.mobile-preview-mode .right-role-rail { display: none !important; }
-    body.mobile-preview-mode .gemini-mobile-hero { display: flex; }
+    body.mobile-preview-mode .gemini-mobile-hero {
+      display: flex !important;
+      width: 100% !important;
+      align-self: stretch !important;
+    }
     body.mobile-preview-mode .conversation-scroll {
       padding: 6px 14px 14px;
       gap: 14px;
@@ -4368,6 +4389,9 @@
         </button>
         <button class="icon-btn-ghost" title="Nạp thư mục hoặc ZIP" onclick="openImportModal()">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
+        </button>
+        <button class="icon-btn-ghost" title="Xóa toàn bộ Cache Service Worker &amp; Tải lại" onclick="forcePurgeAppCache()">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg>
         </button>
       </div>
     </div>
@@ -5003,7 +5027,7 @@
     </div>
 
     <div style="display:flex;justify-content:space-between;align-items:center;margin-top:18px;border-top:1px solid rgba(255,255,255,0.08);padding-top:12px;">
-      <span id="globalSettingsSaveStatus" style="font-size:12px;color:var(--text-muted);"></span>
+      <button type="button" class="action-pill" style="font-size:11.5px;color:#94a3b8;" onclick="forcePurgeAppCache()" title="Xóa toàn bộ cache Service Worker và tải lại mới 100%">🔄 Xóa Cache &amp; Tải Lại</button>
       <div style="display:flex;gap:8px;">
         <button type="button" class="action-pill" onclick="closeGlobalLlmSettingsModal()">Hủy</button>
         <button type="button" class="action-pill primary-purple" onclick="saveGlobalLlmSettings()">💾 Lưu Mặc Định</button>
@@ -10672,9 +10696,36 @@
 <script>
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", () => {
-      navigator.serviceWorker.register("/sw.js").catch(() => {});
+      navigator.serviceWorker.register("/sw.js?v=30").then((reg) => {
+        try { reg.update(); } catch (e) {}
+      }).catch((err) => {
+        console.warn("[SW] Registration error:", err);
+      });
+
+      let refreshing = false;
+      navigator.serviceWorker.addEventListener("controllerchange", () => {
+        if (!refreshing) {
+          refreshing = true;
+          window.location.reload();
+        }
+      });
     });
   }
+
+  // Tiện ích xóa sạch cache toàn bộ app khi cần cưỡng chế cập nhật
+  window.forcePurgeAppCache = async function() {
+    try {
+      if ("caches" in window) {
+        const keys = await caches.keys();
+        await Promise.all(keys.map(k => caches.delete(k)));
+      }
+      if ("serviceWorker" in navigator) {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        for (let r of regs) await r.unregister();
+      }
+    } catch (e) {}
+    window.location.reload(true);
+  };
 </script>
 <!-- LIGHTBOX MODAL CHO HÌNH ẢNH TỪ AI -->
 <div class="image-lightbox-modal" id="imageLightboxModal" onclick="closeImageLightbox()">
