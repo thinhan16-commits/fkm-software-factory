@@ -41,7 +41,7 @@ Hệ thống Công xưởng Phần mềm AI Tự Vận Hành (Self-hosted AI Sof
 
 ### Bước 1: Tải mã nguồn về máy
 ```bash
-git clone https://github.com/your-username/fkm-software-factory.git
+git clone https://github.com/thinhan16-commits/fkm-software-factory.git
 cd fkm-software-factory
 ```
 
