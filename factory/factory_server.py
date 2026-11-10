@@ -29,6 +29,9 @@ from factory_engine import (
     DOWNLOADS_DIR,
     COUNCIL_PERSONAS,
     DEEPSEEK_MODELS,
+    DEEPSEEK_BASE_URL,
+    get_deepseek_api_key,
+    set_deepseek_api_key,
     FactoryProject,
     INBOX_POLL_SECONDS,
     close_bridge_session,
@@ -392,27 +395,33 @@ class GlobalLlmRequest(BaseModel):
 
 @app.get("/api/llm/global-settings")
 async def get_global_llm_settings():
+    ds_key = get_deepseek_api_key()
+    has_ds_key = bool(ds_key)
+    masked_ds_key = (ds_key[:3] + "..." + ds_key[-4:]) if len(ds_key) > 7 else ("sk-****" if ds_key else "")
+
     providers = [
         {
             "id": "chatgpt",
             "name": "ChatGPT Web Bridge",
-            "desc": "Kết nối trực tiếp qua trình duyệt trên máy chủ Ubuntu. Miễn phí, không giới hạn token.",
+            "desc": "Kết nối trực tiếp qua ChatGPT Web. Miễn phí, hỗ trợ GPT-6, GPT-5.6 Sol.",
             "available": True,
             "status_text": "Đang hoạt động"
         },
         {
-            "id": "deepseek_api",
-            "name": "DeepSeek API",
-            "desc": "Kết nối trực tiếp qua API chính thức của DeepSeek.",
-            "available": bool(os.environ.get("DEEPSEEK_API_KEY", "").strip()),
-            "status_text": "Đang hoạt động" if bool(os.environ.get("DEEPSEEK_API_KEY", "").strip()) else "Chưa hỗ trợ (Cần DEEPSEEK_API_KEY)"
+            "id": "deepseek",
+            "name": "DeepSeek Web Bridge",
+            "desc": "Kết nối trực tiếp qua chat.deepseek.com. Miễn phí, hỗ trợ DeepSeek-V3 & DeepSeek-R1 (DeepThink).",
+            "available": True,
+            "status_text": "Sẵn sàng (Web Bridge)"
         },
         {
-            "id": "deepseek",
-            "name": "DeepSeek Web",
-            "desc": "Bridge Web DeepSeek.",
-            "available": False,
-            "status_text": "Chưa hỗ trợ"
+            "id": "deepseek_api",
+            "name": "DeepSeek API",
+            "desc": "Kết nối trực tiếp qua API chính thức api.deepseek.com. Tốc độ siêu nhanh, không cần trình duyệt.",
+            "available": True,
+            "status_text": "Đã kết nối" if has_ds_key else "Cần nhập API Key",
+            "has_key": has_ds_key,
+            "masked_key": masked_ds_key
         },
         {
             "id": "claude",
@@ -434,7 +443,63 @@ async def get_global_llm_settings():
         "providers": providers,
         "efforts": list(LLM_EFFORTS),
         "roles": ROLE_LLM_SETTINGS,
+        "deepseek_key_set": has_ds_key,
+        "deepseek_masked_key": masked_ds_key,
     }
+
+
+class DeepSeekKeyRequest(BaseModel):
+    api_key: str
+
+
+@app.post("/api/llm/deepseek-key")
+async def save_deepseek_key(req: DeepSeekKeyRequest):
+    key = req.api_key.strip()
+    set_deepseek_api_key(key)
+    masked = (key[:3] + "..." + key[-4:]) if len(key) > 7 else "sk-****"
+    return {"success": True, "masked_key": masked, "has_key": bool(key)}
+
+
+@app.get("/api/llm/deepseek-test")
+async def test_deepseek_connection(mode: str = "api"):
+    if mode == "api":
+        key = get_deepseek_api_key()
+        if not key:
+            return {"success": False, "error": "Chưa có API Key. Vui lòng dán khóa API của DeepSeek rồi bấm Lưu."}
+        try:
+            req = urllib.request.Request(
+                f"{DEEPSEEK_BASE_URL}/models",
+                headers={"Authorization": f"Bearer {key}"},
+                method="GET"
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                models = [m.get("id") for m in data.get("data", []) if isinstance(m, dict)]
+                return {"success": True, "message": "Kết nối DeepSeek API thành công!", "models": models}
+        except urllib.error.HTTPError as err:
+            detail = err.read().decode("utf-8", errors="replace")[:200]
+            return {"success": False, "error": f"Lỗi xác thực DeepSeek API ({err.code}): {detail}"}
+        except Exception as e:
+            return {"success": False, "error": f"Lỗi kết nối API: {str(e)}"}
+    else:
+        # Kiểm tra Web Bridge
+        try:
+            url = f"{BRIDGE_BASE_URL}/v1/models?provider=deepseek"
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                return {"success": True, "message": "DeepSeek Web Bridge đã sẵn sàng!", "data": data}
+        except urllib.error.HTTPError as err:
+            detail = err.read().decode("utf-8", errors="replace")[:200]
+            if "đăng nhập" in detail.lower() or "login" in detail.lower() or err.code == 503:
+                return {
+                    "success": False,
+                    "need_login": True,
+                    "error": "Chưa đăng nhập DeepSeek trên Web Bridge. Hãy chạy lệnh './scripts/login.sh deepseek' trên terminal."
+                }
+            return {"success": False, "error": f"Lỗi Bridge ({err.code}): {detail}"}
+        except Exception as e:
+            return {"success": False, "error": f"Không kết nối được Web Bridge: {str(e)}"}
 
 
 @app.put("/api/llm/global-settings")
@@ -464,7 +529,10 @@ async def put_llm_setting(role_id: str, req: RoleLlmRequest):
 
 @app.get("/api/llm/models")
 async def list_llm_models(provider: str = "chatgpt"):
-    """Danh sách model đọc từ bridge theo trang web (chatgpt hoặc deepseek). Nếu bridge chưa đọc được thì trả lỗi để giao diện vẫn nhập tay được."""
+    """Danh sách model đọc từ bridge theo trang web hoặc API (chatgpt hoặc deepseek)."""
+    if provider in ("deepseek", "deepseek_api"):
+        return {"models": ["deepseek-chat", "deepseek-reasoner"], "error": None}
+
     if provider not in BRIDGE_BACKENDS:
         raise HTTPException(status_code=400, detail=f"Trang web không được hỗ trợ: {provider}")
     url = f"{BRIDGE_BASE_URL}/v1/models?provider={provider}"

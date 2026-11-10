@@ -19,9 +19,10 @@ Hệ thống Công xưởng Phần mềm AI Tự Vận Hành (Self-hosted AI Sof
    - Ghi mã nguồn sạch trực tiếp vào ổ đĩa, loại bỏ hoàn toàn các đoạn chat râu ria.
    - Tự động lưu vết lịch sử phiên bản qua Git Commit.
 
-3. **Multi-Provider Web Bridge Tích hợp:**
-   - Kết nối trực tiếp qua trình duyệt web Playwright tới ChatGPT Web & DeepSeek Web.
-   - Sử dụng mô hình AI cao cấp (`GPT-6`, `GPT-5.6 Sol`, `deepseek-v4-pro`...) mà không cần nạp thẻ tín dụng hay lo cạn token API.
+3. **Đa Nguồn AI (ChatGPT & DeepSeek):**
+   - **ChatGPT Web Bridge:** Kết nối trực tiếp qua trình duyệt tới ChatGPT Web (`GPT-6`, `GPT-5.6 Sol`...).
+   - **DeepSeek Web Bridge:** Kết nối miễn phí qua `chat.deepseek.com`, hỗ trợ `deepseek-chat` (V3) và `deepseek-reasoner` (R1 DeepThink).
+   - **DeepSeek API Chính Thức:** Kết nối siêu tốc qua `api.deepseek.com`, quản lý và kiểm tra kết nối API Key trực tiếp trên giao diện Web.
 
 4. **Trải nghiệm Mobile & Remote Terminal:**
    - Giao diện Web PWA tối ưu mượt mà cho điện thoại (iPhone, Android).
@@ -53,9 +54,13 @@ cd fkm-software-factory
 
 ### Bước 3: Đăng nhập tài khoản AI (Chỉ làm 1 lần đầu)
 ```bash
-./scripts/login.sh
+# Đăng nhập ChatGPT Web:
+./scripts/login.sh chatgpt
+
+# Hoặc đăng nhập DeepSeek Web:
+./scripts/login.sh deepseek
 ```
-*Cửa sổ trình duyệt sẽ mở ra. Bạn đăng nhập tài khoản ChatGPT của mình, sau đó quay lại cửa sổ dòng lệnh nhấn **Enter** để lưu phiên.*
+*Cửa sổ trình duyệt sẽ mở ra. Bạn đăng nhập tài khoản của mình, sau đó quay lại cửa sổ dòng lệnh nhấn **Enter** để lưu phiên. Ngoài ra, bạn cũng có thể nhập trực tiếp **DeepSeek API Key** ngay trên giao diện Web mà không cần đăng nhập trình duyệt.*
 
 ### Bước 4: Khởi động hệ thống
 ```bash

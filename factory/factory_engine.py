@@ -238,15 +238,45 @@ LLM_ROLE_IDS = (
 # 'deepseek_api' gọi DeepSeek API trực tiếp; hiện không dùng, giữ lại để sau này.
 LLM_BACKENDS = ("chatgpt", "deepseek", "dola", "deepseek_api")
 BRIDGE_BACKENDS = ("chatgpt", "deepseek", "dola")
-LLM_BACKEND_DEFAULT_MODEL = {"chatgpt": "chatgpt-web-latest", "deepseek": "default", "dola": "Dola AI", "deepseek_api": "deepseek-v4-pro"}
+LLM_BACKEND_DEFAULT_MODEL = {"chatgpt": "chatgpt-web-latest", "deepseek": "deepseek-chat", "dola": "Dola AI", "deepseek_api": "deepseek-chat"}
 LLM_DEFAULT = {"backend": "chatgpt", "model": LLM_BACKEND_DEFAULT_MODEL["chatgpt"], "reasoning_effort": "none"}
-# DeepSeek API: khóa đọc từ biến môi trường DEEPSEEK_API_KEY; DEEPSEEK_BASE_URL chỉ để đổi địa chỉ khi thử nghiệm
-DEEPSEEK_MODELS = ("deepseek-v4-pro", "deepseek-flash")
+# DeepSeek: Mô hình chuẩn V3 và R1 (DeepThink)
+DEEPSEEK_MODELS = ("deepseek-chat", "deepseek-reasoner")
 DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
-DEEPSEEK_MAX_TOKENS = 65536
+DEEPSEEK_MAX_TOKENS = 8192
 DEEPSEEK_MIN_TIMEOUT = 300  # suy luận có thể lâu hơn lượt chat thường
 ROLE_LLM_FILE = os.path.join(FACTORY_ROOT, "role_llm_settings.json")
 GLOBAL_LLM_FILE = os.path.join(FACTORY_ROOT, "global_llm_settings.json")
+DEEPSEEK_KEY_FILE = os.path.join(FACTORY_ROOT, "deepseek_key.json")
+
+
+def get_deepseek_api_key() -> str:
+    """Đọc DeepSeek API key từ biến môi trường hoặc tệp lưu trữ bảo mật deepseek_key.json."""
+    key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    if key:
+        return key
+    if os.path.exists(DEEPSEEK_KEY_FILE):
+        try:
+            with open(DEEPSEEK_KEY_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                saved_key = (data.get("api_key") or "").strip()
+                if saved_key:
+                    os.environ["DEEPSEEK_API_KEY"] = saved_key
+                    return saved_key
+        except Exception:
+            pass
+    return ""
+
+
+def set_deepseek_api_key(api_key: str) -> None:
+    """Lưu DeepSeek API key vào tệp bảo mật và cập nhật biến môi trường."""
+    clean_key = (api_key or "").strip()
+    os.environ["DEEPSEEK_API_KEY"] = clean_key
+    try:
+        with open(DEEPSEEK_KEY_FILE, "w", encoding="utf-8") as f:
+            json.dump({"api_key": clean_key, "updated_at": int(time.time())}, f, indent=2)
+    except Exception as e:
+        print(f"⚠️ Không thể lưu {DEEPSEEK_KEY_FILE}: {e}")
 
 
 def _load_global_llm_setting() -> Dict[str, str]:
@@ -806,25 +836,32 @@ async def call_deepseek(
     reasoning_effort: str = "none",
     timeout: int = 90,
 ) -> Dict[str, Any]:
-    """Gọi DeepSeek API (tương thích OpenAI). Khóa chỉ đọc từ biến môi trường, không ghi ra file hay log.
+    """Gọi DeepSeek API (tương thích OpenAI). Khóa đọc từ biến môi trường hoặc tệp cấu hình bảo mật.
     Trả về cùng dạng với bridge: choices[0].message có content và reasoning_content."""
-    api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    api_key = get_deepseek_api_key()
     if not api_key:
-        raise RuntimeError("Chưa đặt biến môi trường DEEPSEEK_API_KEY trên máy chủ nên không gọi được DeepSeek.")
-    thinking = reasoning_effort != "none"
+        raise RuntimeError("Chưa cấu hình DEEPSEEK_API_KEY. Vui lòng vào Cài Đặt AI để nhập khóa API DeepSeek.")
+
+    target_model = (model or "").strip().lower()
+    is_reasoner = (
+        "reasoner" in target_model
+        or "r1" in target_model
+        or reasoning_effort in ("low", "medium", "high")
+    )
+    actual_model = "deepseek-reasoner" if is_reasoner else "deepseek-chat"
+
     payload: Dict[str, Any] = {
-        "model": model or LLM_BACKEND_DEFAULT_MODEL["deepseek"],
+        "model": actual_model,
         "messages": messages,
         "stream": False,
         "max_tokens": DEEPSEEK_MAX_TOKENS,
-        "thinking": {"type": "enabled" if thinking else "disabled"},
     }
-    if thinking:
-        payload["reasoning_effort"] = "high" if reasoning_effort == "medium" else reasoning_effort
+
     if json_mode:
-        payload["response_format"] = {"type": "json_object"}
+        if actual_model == "deepseek-chat":
+            payload["response_format"] = {"type": "json_object"}
         if not any("json" in str(m.get("content", "")).lower() for m in messages):
-            payload["messages"] = messages + [{"role": "system", "content": "Trả lời bằng JSON hợp lệ."}]
+            payload["messages"] = list(messages) + [{"role": "system", "content": "Trả lời bằng JSON hợp lệ."}]
 
     def _do_request() -> Dict[str, Any]:
         req = urllib.request.Request(
@@ -845,7 +882,10 @@ async def call_deepseek(
     data = await asyncio.to_thread(_do_request)
     for choice in data.get("choices", []):
         msg = choice.get("message", {})
-        msg["content"], msg["reasoning_content"] = _split_reasoning_tags(msg.get("content"), msg.get("reasoning_content"))
+        reasoning_direct = msg.get("reasoning_content")
+        clean_content, reasoning_parsed = _split_reasoning_tags(msg.get("content"), reasoning_direct)
+        msg["content"] = clean_content
+        msg["reasoning_content"] = reasoning_direct or reasoning_parsed
     return data
 
 

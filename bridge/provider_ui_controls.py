@@ -55,8 +55,35 @@ def _is_chatgpt_picker_control_label(value: str) -> bool:
     )
 
 
-# DeepSeek và Dola AI không có ô chọn model phức tạp, chỉ có một mô hình mặc định. Bridge dùng mô hình đó luôn.
-SINGLE_MODEL_PROVIDERS = {"deepseek": "DeepSeek", "dola": "Dola AI"}
+# Dola AI chỉ có một mô hình mặc định.
+SINGLE_MODEL_PROVIDERS = {"dola": "Dola AI"}
+
+
+def _deepseek_model_state(reasoner_selected: bool = False) -> Dict[str, Any]:
+    return {
+        "models": [
+            {
+                "id": "deepseek-chat",
+                "display_name": "DeepSeek-V3",
+                "description": "Mô hình V3 chuẩn, phản hồi siêu nhanh và thông minh.",
+                "selected": not reasoner_selected,
+                "supportsImageInput": False,
+                "supported_reasoning_levels": ["none"],
+            },
+            {
+                "id": "deepseek-reasoner",
+                "display_name": "DeepSeek-R1 (DeepThink)",
+                "description": "Mô hình suy luận sâu R1 qua chế độ DeepThink.",
+                "selected": reasoner_selected,
+                "supportsImageInput": False,
+                "supported_reasoning_levels": ["low", "medium", "high"],
+            }
+        ],
+        "selected_model": "deepseek-reasoner" if reasoner_selected else "deepseek-chat",
+        "supported_reasoning_levels": ["none", "low", "medium", "high"],
+        "reasoning_effort": "high" if reasoner_selected else "none",
+        "reasoning_label": "DeepThink (R1)" if reasoner_selected else None,
+    }
 
 
 def _single_model_state(provider: str) -> Dict[str, Any]:
@@ -328,6 +355,8 @@ async def inspect_provider_ui(page: Any, provider: str) -> Dict[str, Any]:
     """Return the current model list and visible reasoning controls without
     changing the user's selection or sending a message.
     """
+    if provider == "deepseek":
+        return _deepseek_model_state()
     if provider in SINGLE_MODEL_PROVIDERS:
         return _single_model_state(provider)
     await _open_picker(page, provider)
@@ -400,6 +429,53 @@ def _match_model_choice(requested: str, models: List[Dict[str, Any]]) -> Optiona
     return next((item for item in models if item.get("selected")), models[0])
 
 
+async def _apply_deepseek_ui_settings(
+    page: Any,
+    model: str,
+    reasoning_effort: str = "none",
+) -> Dict[str, Any]:
+    want_reasoner = (
+        "reasoner" in (model or "").lower()
+        or "r1" in (model or "").lower()
+        or reasoning_effort in ("low", "medium", "high")
+    )
+    try:
+        selectors = [
+            "button:has-text('DeepThink')",
+            "div[role='button']:has-text('DeepThink')",
+            "span:has-text('DeepThink')",
+            "button:has-text('深度思考')",
+            "div[role='button']:has-text('深度思考')",
+            "[class*='deepthink']",
+            "[data-testid*='deepthink']",
+        ]
+        deepthink_btn = None
+        for sel in selectors:
+            loc = page.locator(sel).first
+            if await loc.count() > 0 and await loc.is_visible():
+                deepthink_btn = loc
+                break
+
+        if deepthink_btn:
+            is_active = await deepthink_btn.evaluate("""el => {
+                const target = el.closest('button, [role="button"]') || el;
+                const cls = (target.className || '').toLowerCase();
+                const aria = target.getAttribute('aria-pressed') || target.getAttribute('aria-checked') || '';
+                return cls.includes('active') || cls.includes('selected') || cls.includes('checked')
+                    || aria === 'true' || target.getAttribute('data-active') === 'true';
+            }""")
+            if want_reasoner and not is_active:
+                await deepthink_btn.click()
+                await page.wait_for_timeout(300)
+            elif not want_reasoner and is_active:
+                await deepthink_btn.click()
+                await page.wait_for_timeout(300)
+    except Exception as e:
+        print(f"⚠️ [DEEPSEEK_UI] Không thể điều chỉnh toggle DeepThink: {e}")
+
+    return _deepseek_model_state(reasoner_selected=want_reasoner)
+
+
 async def apply_provider_ui_settings(
     page: Any,
     provider: str,
@@ -409,6 +485,9 @@ async def apply_provider_ui_settings(
     """Select one exact model and, when supported, one exact web-UI effort."""
     if reasoning_effort not in {"none", "low", "medium", "high"}:
         raise ProviderUiError(f"{provider}: unsupported reasoning effort {reasoning_effort}")
+
+    if provider == "deepseek":
+        return await _apply_deepseek_ui_settings(page, model, reasoning_effort)
 
     if provider in SINGLE_MODEL_PROVIDERS:
         only_model = SINGLE_MODEL_PROVIDERS[provider]

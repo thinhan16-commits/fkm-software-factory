@@ -21,6 +21,9 @@ merged_source/
 director_inbox/
 global_llm_settings.json
 role_llm_settings.json
+deepseek_key.json
+*deepseek*.json
+*.key
 
 # Browser Profiles & Authentication State (DO NOT COMMIT COOKIES / LOGINS)
 bridge/profiles/
