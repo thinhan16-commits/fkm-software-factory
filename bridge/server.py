@@ -31,6 +31,14 @@ from passive_network_response_capture import (
 )
 
 import factory_sessions
+import native_api_adapter
+from native_api_adapter import (
+    NativeSessionTracker,
+    build_tools_system_instruction,
+    parse_tool_calls_from_response,
+    compile_native_turn,
+    format_sse_response_chunks,
+)
 
 app = FastAPI(
     title="Multi-Provider Web Bridge (AVS Dynamic Model & Reasoning Gateway v3.7)",
@@ -236,6 +244,10 @@ BRIDGE_PORT = int(os.environ.get("BRIDGE_PORT", "8001"))
 BRIDGE_PROFILES_DIR = os.environ.get("BRIDGE_PROFILES_DIR", "./profiles")
 for _provider_config in PROVIDERS.values():
     _provider_config["profile_dir"] = os.path.join(BRIDGE_PROFILES_DIR, os.path.basename(_provider_config["profile_dir"]))
+
+native_tracker = NativeSessionTracker(
+    store_path=os.path.join(os.path.abspath(BRIDGE_PROFILES_DIR), "native_sessions.json")
+)
 provider_ui_locks: Dict[str, asyncio.Lock] = {}
 
 def get_provider_lock(provider: str) -> asyncio.Lock:
@@ -917,8 +929,14 @@ class MessageContentPart(BaseModel):
 
 class Message(BaseModel):
     role: str
-    content: Union[str, List[Dict[str, Any]], List[MessageContentPart]]
+    content: Optional[Union[str, List[Dict[str, Any]], List[MessageContentPart]]] = None
     name: Optional[str] = None
+    tool_calls: Optional[List[Dict[str, Any]]] = None
+    tool_call_id: Optional[str] = None
+    function_call: Optional[Dict[str, Any]] = None
+
+    class Config:
+        extra = "allow"
 
 class ChatRequest(BaseModel):
     model: Optional[str] = "chatgpt-web-latest"
@@ -951,6 +969,16 @@ class ChatRequest(BaseModel):
     # (chưa gửi gì) thay vì tự mở chat mới.
     persist_session: Optional[bool] = False
     resume_expected: Optional[bool] = False
+    # Native OpenAI / DeepSeek API compatibility fields
+    tools: Optional[List[Dict[str, Any]]] = None
+    tool_choice: Optional[Any] = None
+    parallel_tool_calls: Optional[bool] = None
+    user: Optional[str] = None
+    stream_options: Optional[Dict[str, Any]] = None
+    auto_session: Optional[bool] = None
+
+    class Config:
+        extra = "allow"
 
 class BridgeUiSettingsRequest(BaseModel):
     provider: str
@@ -4445,6 +4473,243 @@ def role_thread_stream_generator(
     # cannot strand the persistent role and provider-capacity locks.
     return stream_items()
 
+
+def session_stream_generator(
+    page,
+    config: dict,
+    response_id: str,
+    model_name: str,
+    *,
+    provider: str,
+    session_id: str,
+    timeout: int,
+    submitted_prompt: str,
+    baseline_response_count: int,
+    baseline_user_message_count: Optional[int],
+    expected_user_marker: Optional[str],
+    is_json_requested: bool,
+    prompt_token_count: int,
+    session_lock: asyncio.Lock,
+    semaphore: asyncio.Semaphore,
+    persist: bool,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    stream_options: Optional[Dict[str, Any]] = None,
+    system_hash: Optional[str] = None,
+    session_key: str = "",
+) -> AsyncGenerator[str, None]:
+    """Stream a multi-tab session turn with OpenAI SSE formatting, tool calling, and lock management."""
+    queue: asyncio.Queue = asyncio.Queue()
+
+    def publish_delta(delta: str) -> None:
+        if delta:
+            queue.put_nowait(("delta", delta))
+
+    async def produce() -> None:
+        try:
+            raw_output = await wait_for_completion(
+                page,
+                config,
+                timeout=timeout,
+                submitted_prompt=submitted_prompt,
+                baseline_response_count=baseline_response_count,
+                baseline_user_message_count=baseline_user_message_count,
+                expected_user_marker=expected_user_marker,
+                on_text_delta=publish_delta,
+                is_json_requested=is_json_requested,
+            )
+            if not raw_output:
+                raise HTTPException(
+                    status_code=504,
+                    detail={
+                        "code": "BRIDGE_SESSION_STREAM_TIMEOUT",
+                        "outcome": "unconfirmed",
+                        "retryable": False,
+                        "message": "Bridge không nhận được phản hồi từ giao diện web trong thời hạn của yêu cầu.",
+                    },
+                )
+            if persist:
+                _save_factory_url(provider, session_id, page, "after_stream_completion")
+
+            clean_content, reasoning_content = extract_and_clean_output(raw_output, is_json_requested)
+
+            active_content, tool_calls = parse_tool_calls_from_response(clean_content, tools)
+
+            total_resp_chars = len(clean_content)
+            native_tracker.record_turn(
+                session_id,
+                prompt_chars=len(submitted_prompt),
+                response_chars=total_resp_chars,
+                system_hash=system_hash,
+            )
+
+            completion_tokens = len(clean_content.split())
+            usage = {
+                "prompt_tokens": prompt_token_count,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_token_count + completion_tokens,
+            }
+
+            now = int(time.time())
+            if reasoning_content:
+                queue.put_nowait(("payload", {
+                    "id": response_id,
+                    "object": "chat.completion.chunk",
+                    "created": now,
+                    "model": model_name,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"reasoning_content": reasoning_content},
+                        "finish_reason": None,
+                    }]
+                }))
+            if tools and active_content:
+                queue.put_nowait(("payload", {
+                    "id": response_id,
+                    "object": "chat.completion.chunk",
+                    "created": now,
+                    "model": model_name,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"content": active_content},
+                        "finish_reason": None,
+                    }]
+                }))
+            if tool_calls:
+                for idx, tc in enumerate(tool_calls):
+                    fn_dict = tc.get("function", {}) if isinstance(tc, dict) else {}
+                    tc_chunk = {
+                        "id": response_id,
+                        "object": "chat.completion.chunk",
+                        "created": now,
+                        "model": model_name,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [{
+                                    "index": idx,
+                                    "id": tc.get("id"),
+                                    "type": "function",
+                                    "function": {
+                                        "name": fn_dict.get("name"),
+                                        "arguments": fn_dict.get("arguments", "{}"),
+                                    }
+                                }]
+                            },
+                            "finish_reason": None,
+                        }]
+                    }
+                    queue.put_nowait(("payload", tc_chunk))
+
+                final_chunk = {
+                    "id": response_id,
+                    "object": "chat.completion.chunk",
+                    "created": now,
+                    "model": model_name,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "tool_calls",
+                    }]
+                }
+                queue.put_nowait(("payload", final_chunk))
+            else:
+                final_chunk = {
+                    "id": response_id,
+                    "object": "chat.completion.chunk",
+                    "created": now,
+                    "model": model_name,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "stop",
+                    }]
+                }
+                queue.put_nowait(("payload", final_chunk))
+
+            if isinstance(stream_options, dict) and stream_options.get("include_usage"):
+                usage_chunk = {
+                    "id": response_id,
+                    "object": "chat.completion.chunk",
+                    "created": now,
+                    "model": model_name,
+                    "choices": [],
+                    "usage": usage,
+                }
+                queue.put_nowait(("payload", usage_chunk))
+
+            queue.put_nowait(("done", None))
+        except HTTPException as error:
+            detail = error.detail
+            error_payload = detail if isinstance(detail, dict) else {
+                "code": "BRIDGE_SESSION_STREAM_FAILED",
+                "outcome": "unconfirmed",
+                "retryable": False,
+                "message": str(detail),
+            }
+            queue.put_nowait(("payload", {"error": error_payload}))
+            queue.put_nowait(("done", None))
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            queue.put_nowait(("payload", {"error": {
+                "code": "BRIDGE_SESSION_STREAM_FAILED",
+                "outcome": "unconfirmed",
+                "retryable": False,
+                "message": f"Bridge session stream failed: {type(error).__name__}: {error}",
+            }}))
+            queue.put_nowait(("done", None))
+        finally:
+            if session_key:
+                session_last_used[session_key] = time.time()
+            if session_lock.locked():
+                session_lock.release()
+            semaphore.release()
+            queue.put_nowait(("close", None))
+
+    producer = asyncio.create_task(produce())
+
+    async def stream_items() -> AsyncGenerator[str, None]:
+        # Emit initial role delta chunk
+        initial_role_chunk = {
+            "id": response_id,
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": model_name,
+            "choices": [{
+                "index": 0,
+                "delta": {"role": "assistant", "content": ""},
+                "finish_reason": None,
+            }],
+        }
+        yield f"data: {json.dumps(initial_role_chunk, ensure_ascii=False)}\n\n"
+
+        while True:
+            kind, value = await queue.get()
+            if kind == "close":
+                break
+            if kind == "delta":
+                # Only stream delta tokens if no tools are declared (tools require buffering to avoid partial leaks)
+                if not tools:
+                    payload = {
+                        "id": response_id,
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": model_name,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"content": value},
+                            "finish_reason": None,
+                        }],
+                    }
+                    yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            elif kind == "payload":
+                yield f"data: {json.dumps(value, ensure_ascii=False)}\n\n"
+            elif kind == "done":
+                yield "data: [DONE]\n\n"
+        await producer
+
+    return stream_items()
+
 def build_avs_model_payload(model_id: str, meta: dict) -> dict:
     """Tạo payload model chuẩn OpenAI + tương thích 100% với AI Video Studio (AVS) & Codex catalog."""
     return {
@@ -4569,13 +4834,18 @@ async def execute_factory_build(req: FactoryBuildRequest):
     import base64, io, shutil, zipfile, subprocess, glob, hashlib
     
     workspace = os.path.expanduser(f"~/ai-software-factory/projects/{req.project_id}/build_workspace")
+    staging_workspace = os.path.expanduser(f"~/ai-software-factory/projects/{req.project_id}/staging_build/iter_{req.iteration}")
     os.makedirs(workspace, exist_ok=True)
+    if os.path.exists(staging_workspace):
+        shutil.rmtree(staging_workspace, ignore_errors=True)
+    os.makedirs(staging_workspace, exist_ok=True)
+
     combined_logs = []
     
     if req.zip_base64:
         try:
             zip_bytes = base64.b64decode(req.zip_base64)
-            # Bảo tồn cấu hình Gradle tối ưu nếu zip từ Linux chưa có
+            # Bảo tồn cấu hình Gradle tối ưu từ workspace nếu có
             gradle_prop_path = os.path.join(workspace, "android/gradle/wrapper/gradle-wrapper.properties")
             saved_gradle_props = None
             if os.path.exists(gradle_prop_path):
@@ -4583,12 +4853,13 @@ async def execute_factory_build(req: FactoryBuildRequest):
                     saved_gradle_props = f.read()
 
             with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-                zf.extractall(workspace)
+                zf.extractall(staging_workspace)
 
-            if saved_gradle_props and os.path.exists(os.path.dirname(gradle_prop_path)):
-                with open(gradle_prop_path, "w", encoding="utf-8") as f:
+            staging_gradle_prop = os.path.join(staging_workspace, "android/gradle/wrapper/gradle-wrapper.properties")
+            if saved_gradle_props and os.path.exists(os.path.dirname(staging_gradle_prop)):
+                with open(staging_gradle_prop, "w", encoding="utf-8") as f:
                     f.write(saved_gradle_props)
-            combined_logs.append(f"📦 [Mac Build Runner] Đã giải nén mã nguồn vào: {workspace}")
+            combined_logs.append(f"📦 [Mac Build Runner] Đã giải nén mã nguồn vào thư mục tạm: {staging_workspace}")
         except Exception as e:
             return {"passed": False, "exit_code": 1, "failed_step": "EXTRACT", "log": f"Lỗi giải nén ZIP: {e}"}
 
@@ -4602,13 +4873,13 @@ async def execute_factory_build(req: FactoryBuildRequest):
         env["ANDROID_HOME"] = android_home
     env["PATH"] = f"/opt/homebrew/bin:/usr/local/bin:{java_home}/bin:{android_home}/platform-tools:{env.get('PATH', '')}"
 
-    def run_cmd(cmd_str: str, timeout_sec: int = 300) -> tuple:
+    def run_cmd(cmd_str: str, cwd: str = staging_workspace, timeout_sec: int = 300) -> tuple:
         if not cmd_str or not cmd_str.strip():
             return 0, ""
         try:
             proc = subprocess.Popen(
                 ["/bin/bash", "-c", cmd_str],
-                cwd=workspace,
+                cwd=cwd,
                 env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -4628,7 +4899,6 @@ async def execute_factory_build(req: FactoryBuildRequest):
         ("BACKUP", req.backup_cmd, 120),
         ("INSTALL", req.install_cmd, 300),
         ("TEST/BUILD", req.test_cmd, 300),
-        ("DEPLOY", req.deploy_cmd, 300),
     ]
 
     exit_code = 0
@@ -4637,7 +4907,7 @@ async def execute_factory_build(req: FactoryBuildRequest):
         if not (cmd and cmd.strip()):
             continue
         combined_logs.append(f"=== [{label}]: {cmd} ===")
-        code, out = await asyncio.to_thread(run_cmd, cmd, limit)
+        code, out = await asyncio.to_thread(run_cmd, cmd, staging_workspace, limit)
         combined_logs.append(f"{out.strip()}\n(exit={code})")
         if code != 0:
             exit_code, failed_step = code, label
@@ -4645,30 +4915,65 @@ async def execute_factory_build(req: FactoryBuildRequest):
 
     apk_installed = False
     connected_device = ""
-    is_flutter = os.path.exists(os.path.join(workspace, "pubspec.yaml"))
+    is_flutter = os.path.exists(os.path.join(staging_workspace, "pubspec.yaml"))
     
     if exit_code == 0 and req.auto_android and is_flutter:
         combined_logs.append("=== [MAC FLUTTER & ANDROID AUTO-BUILD PIPELINE] ===")
-        c_pub, out_pub = await asyncio.to_thread(run_cmd, "flutter pub get", 180)
+        c_pub, out_pub = await asyncio.to_thread(run_cmd, "flutter pub get", staging_workspace, 180)
         combined_logs.append(f"flutter pub get (exit={c_pub})\n{out_pub}")
         if c_pub == 0:
-            c_apk, out_apk = await asyncio.to_thread(run_cmd, "flutter build apk --debug", 300)
+            c_apk, out_apk = await asyncio.to_thread(run_cmd, "flutter build apk --debug", staging_workspace, 300)
             combined_logs.append(f"flutter build apk --debug (exit={c_apk})\n{out_apk}")
-            if c_apk == 0:
-                apk_path = os.path.join(workspace, "build/app/outputs/flutter-apk/app-debug.apk")
-                if os.path.exists(apk_path):
-                    c_dev, out_dev = await asyncio.to_thread(run_cmd, "adb devices | awk 'NR>1 && $2==\"device\" {print $1; exit}'", 15)
-                    dev_serial = out_dev.strip()
-                    if dev_serial:
-                        connected_device = dev_serial
-                        combined_logs.append(f"📱 Tìm thấy thiết bị Android: {dev_serial}. Đang cài APK...")
-                        c_inst, out_inst = await asyncio.to_thread(run_cmd, f"adb -s '{dev_serial}' install -r --user 0 '{apk_path}'", 60)
-                        combined_logs.append(f"adb install (exit={c_inst})\n{out_inst}")
-                        if c_inst == 0:
-                            apk_installed = True
-                            pkg_id = "com.example.vuong_quoc_tri_tue"
-                            c_open, _ = await asyncio.to_thread(run_cmd, f"adb -s '{dev_serial}' shell monkey -p {pkg_id} -c android.intent.category.LAUNCHER 1", 15)
-                            combined_logs.append(f"🎉 Đã tự động cài đặt và khởi chạy {pkg_id} trên {dev_serial} thành công!")
+            if c_apk != 0:
+                exit_code, failed_step = c_apk, "FLUTTER_BUILD_APK"
+        else:
+            exit_code, failed_step = c_pub, "FLUTTER_PUB_GET"
+
+    if exit_code != 0:
+        combined_logs.append(f"🛡️ [Staging Gate] Mac Build FAIL ở bước {failed_step}! Main workspace được giữ nguyên 100%.")
+    else:
+        # Build PASS: Đồng bộ từ staging_workspace lên workspace (main) bảo tồn .git
+        try:
+            for item in os.listdir(workspace):
+                if item == ".git":
+                    continue
+                p = os.path.join(workspace, item)
+                if os.path.isdir(p) and not os.path.islink(p):
+                    shutil.rmtree(p, ignore_errors=True)
+                else:
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
+            shutil.copytree(staging_workspace, workspace, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git"))
+            combined_logs.append(f"✅ [Staging Gate] Mac Build PASS! Đã đồng bộ mã nguồn lên main (build_workspace).")
+        except Exception as sync_err:
+            combined_logs.append(f"⚠️ [Staging Gate] Lỗi đồng bộ lên main: {sync_err}")
+
+        # Chạy DEPLOY nếu có
+        if req.deploy_cmd and req.deploy_cmd.strip():
+            combined_logs.append(f"=== [DEPLOY]: {req.deploy_cmd} ===")
+            code_dep, out_dep = await asyncio.to_thread(run_cmd, req.deploy_cmd, workspace, 300)
+            combined_logs.append(f"{out_dep.strip()}\n(exit={code_dep})")
+            if code_dep != 0:
+                exit_code, failed_step = code_dep, "DEPLOY"
+
+        # Nếu có build APK thành công và auto_android, cài đặt vào máy thật qua ADB
+        if exit_code == 0 and req.auto_android and is_flutter:
+            apk_path = os.path.join(workspace, "build/app/outputs/flutter-apk/app-debug.apk")
+            if os.path.exists(apk_path):
+                c_dev, out_dev = await asyncio.to_thread(run_cmd, "adb devices | awk 'NR>1 && $2==\"device\" {print $1; exit}'", workspace, 15)
+                dev_serial = out_dev.strip()
+                if dev_serial:
+                    connected_device = dev_serial
+                    combined_logs.append(f"📱 Tìm thấy thiết bị Android: {dev_serial}. Đang cài APK...")
+                    c_inst, out_inst = await asyncio.to_thread(run_cmd, f"adb -s '{dev_serial}' install -r --user 0 '{apk_path}'", workspace, 60)
+                    combined_logs.append(f"adb install (exit={c_inst})\n{out_inst}")
+                    if c_inst == 0:
+                        apk_installed = True
+                        pkg_id = "com.example.vuong_quoc_tri_tue"
+                        c_open, _ = await asyncio.to_thread(run_cmd, f"adb -s '{dev_serial}' shell monkey -p {pkg_id} -c android.intent.category.LAUNCHER 1", workspace, 15)
+                        combined_logs.append(f"🎉 Đã tự động cài đặt và khởi chạy {pkg_id} trên {dev_serial} thành công!")
 
     passed = exit_code == 0
     full_log_text = "\n\n".join(combined_logs).strip() or "Không có output log."
@@ -4790,6 +5095,7 @@ async def chat_completions(req: ChatRequest):
     prompt_to_send = prompt
     prompt_file_path = None
     adaptive_prompt_file = None
+    seed_file_path = None
     attachment_paths = validated_attachment_paths(req.attachments)
     response_id = f"chatcmpl-{int(time.time()*1000)}"
     temporary_chat = False
@@ -4801,7 +5107,7 @@ async def chat_completions(req: ChatRequest):
     page = None
 
     def cleanup_temp_files():
-        nonlocal adaptive_prompt_file
+        nonlocal adaptive_prompt_file, seed_file_path
         for path in image_paths:
             if path.startswith("/tmp/footage_frame_") and os.path.exists(path):
                 try:
@@ -4818,6 +5124,21 @@ async def chat_completions(req: ChatRequest):
                 os.remove(adaptive_prompt_file)
             except Exception:
                 pass
+        if seed_file_path and os.path.exists(seed_file_path):
+            try:
+                os.remove(seed_file_path)
+            except Exception:
+                pass
+
+    # --- AUTO-SESSION RESOLUTION FOR NATIVE OPENAI / DEEPSEEK CLIENTS ---
+    if not req.role_thread_id and not req.session_id and req.auto_session is not False:
+        # Check if caller wants stateless or auto_session
+        is_explicit_stateless = (req.stateless is True and getattr(req, "auto_session", None) is False)
+        if not is_explicit_stateless:
+            resolved_sid, is_rotated = native_tracker.resolve_session_id(provider, req)
+            req.session_id = resolved_sid
+            req.persist_session = True
+            req.stateless = False
 
     # --- AVS persistent provider-native role thread ---
     if req.role_thread_id:
@@ -5183,130 +5504,221 @@ async def chat_completions(req: ChatRequest):
         persist = bool(req.persist_session) and not req.stateless
         if persist:
             _ensure_factory_janitor()
-        async with get_factory_semaphore():
-            async with s_lock:
-                try:
-                    session_downloads[session_key] = []
-                    session_download_failures[session_key] = []
-                    resume_url = None
-                    resumed = False
-                    if persist:
-                        live_tab = session_pages.get(session_key)
-                        if live_tab is not None and not live_tab.is_closed():
-                            resumed = True
-                        else:
-                            saved_url = _factory_store(provider).get(req.session_id)
-                            if saved_url and not _factory_url_ok(provider, saved_url):
-                                saved_url = None
-                            if req.resume_expected:
-                                if not saved_url:
-                                    raise HTTPException(
-                                        status_code=409,
-                                        detail="conversation_lost: bridge không còn địa chỉ cuộc trò chuyện của phiên này; chưa gửi gì.",
-                                    )
-                                resume_url = saved_url
-                            elif saved_url:
-                                _factory_store(provider).drop(req.session_id)  # phiên mới trùng tên: bỏ địa chỉ cũ, lượt đầu sẽ ghi địa chỉ mới
-                    s_page = await init_session_page(provider, req.session_id, req.download_dir, resume_url=resume_url)
-                    await ensure_provider_page_ready(s_page, config)
-                    if resume_url:
-                        verdict = await _verify_resumed_conversation(s_page, config, resume_url)
-                        if verdict == "lost":
-                            await _discard_factory_page(provider, req.session_id)
+        sem = get_factory_semaphore()
+        session_stream_transferred = False
+        sem_acquired = False
+        s_lock_acquired = False
+        try:
+            await sem.acquire()
+            sem_acquired = True
+            await s_lock.acquire()
+            s_lock_acquired = True
+            session_downloads[session_key] = []
+            session_download_failures[session_key] = []
+            resume_url = None
+            resumed = False
+            if persist:
+                live_tab = session_pages.get(session_key)
+                if live_tab is not None and not live_tab.is_closed():
+                    resumed = True
+                else:
+                    saved_url = _factory_store(provider).get(req.session_id)
+                    if saved_url and not _factory_url_ok(provider, saved_url):
+                        saved_url = None
+                    if req.resume_expected:
+                        if not saved_url:
                             raise HTTPException(
                                 status_code=409,
-                                detail="conversation_lost: ChatGPT không còn cuộc trò chuyện đã lưu của phiên này (đã bị xóa); chưa gửi gì.",
+                                detail="conversation_lost: bridge không còn địa chỉ cuộc trò chuyện của phiên này; chưa gửi gì.",
                             )
-                        if verdict != "ok":
-                            await _discard_factory_page(provider, req.session_id, forget=False)  # giữ địa chỉ: lần sau mở lại bình thường
-                            raise HTTPException(
-                                status_code=503,
-                                detail="Chưa mở lại được cuộc trò chuyện đã lưu (trang tải chậm hoặc lỗi tạm thời); chưa gửi gì, địa chỉ vẫn được giữ. Thử lại sau ít phút.",
-                            )
-                        resumed = True
-                        await _wait_generation_idle(s_page, config, min(600.0, require_remaining_timeout_sec()))
-                    if req.stateless:
-                        await perform_fast_new_chat(s_page, config)
-                    prompt_to_send = prompt
-                    if resumed and len(req.messages) > 1:
-                        prompt_to_send, _, _ = compile_multimodal_request(req, is_resumed_session=True)
-                        print(f"BRIDGE_RESUMED_SESSION_DEDUPLICATED: Session {req.session_id} - filtered history, sending only latest turn ({len(prompt_to_send)} chars)")
-
-                    adaptive_directive, adaptive_file = package_oversized_prompt_if_needed(
-                        prompt_to_send,
-                        provider,
-                        prefix=f"factory-{req.session_id}",
+                        resume_url = saved_url
+                    elif saved_url:
+                        _factory_store(provider).drop(req.session_id)  # phiên mới trùng tên: bỏ địa chỉ cũ, lượt đầu sẽ ghi địa chỉ mới
+            s_page = await init_session_page(provider, req.session_id, req.download_dir, resume_url=resume_url)
+            await ensure_provider_page_ready(s_page, config)
+            if resume_url:
+                verdict = await _verify_resumed_conversation(s_page, config, resume_url)
+                if verdict == "lost":
+                    await _discard_factory_page(provider, req.session_id)
+                    raise HTTPException(
+                        status_code=409,
+                        detail="conversation_lost: ChatGPT không còn cuộc trò chuyện đã lưu của phiên này (đã bị xóa); chưa gửi gì.",
                     )
-                    if adaptive_file:
-                        adaptive_prompt_file = adaptive_file
-                        prompt_to_send = adaptive_directive
+                if verdict != "ok":
+                    await _discard_factory_page(provider, req.session_id, forget=False)  # giữ địa chỉ: lần sau mở lại bình thường
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Chưa mở lại được cuộc trò chuyện đã lưu (trang tải chậm hoặc lỗi tạm thời); chưa gửi gì, địa chỉ vẫn được giữ. Thử lại sau ít phút.",
+                    )
+                resumed = True
+                await _wait_generation_idle(s_page, config, min(600.0, require_remaining_timeout_sec()))
+            if req.stateless:
+                await perform_fast_new_chat(s_page, config)
 
-                    if image_paths:
-                        await upload_images_to_page(s_page, image_paths, config)
-                    if adaptive_prompt_file:
-                        await upload_files_to_page(s_page, [adaptive_prompt_file], config, attachment_kind="markdown")
-                    if attachment_paths:
-                        await upload_files_to_page(s_page, attachment_paths, config)
-                    await send_prompt_to_page(
+            # Apply provider UI settings (model and reasoning effort)
+            ui_state, _ = await prepare_provider_turn_before_dispatch(
+                s_page,
+                provider,
+                config,
+                req.model or "auto",
+                req.reasoning_effort or "none",
+                stateless=False,
+            )
+            selected_model_name = ui_state.get("selected_model", req.model or provider)
+
+            # Smart context & history packaging via native_api_adapter
+            known_sys_hash = native_tracker.get_system_hash(req.session_id)
+            prompt_to_send, seed_file_path, req_is_json, current_sys_hash = compile_native_turn(
+                req,
+                req.session_id,
+                is_resumed_session=resumed,
+                known_system_hash=known_sys_hash,
+            )
+            is_json_requested = is_json_requested or req_is_json
+            expected_user_marker = os.path.basename(seed_file_path) if seed_file_path else None
+
+            adaptive_prompt_file = None
+            if not seed_file_path:
+                adaptive_directive, adaptive_file = package_oversized_prompt_if_needed(
+                    prompt_to_send,
+                    provider,
+                    prefix=f"factory-{req.session_id}",
+                )
+                if adaptive_file:
+                    adaptive_prompt_file = adaptive_file
+                    prompt_to_send = adaptive_directive
+                    expected_user_marker = os.path.basename(adaptive_file)
+
+            if image_paths:
+                await upload_images_to_page(s_page, image_paths, config)
+            if seed_file_path:
+                await upload_files_to_page(s_page, [seed_file_path], config, attachment_kind="markdown")
+            if adaptive_prompt_file:
+                await upload_files_to_page(s_page, [adaptive_prompt_file], config, attachment_kind="markdown")
+            if attachment_paths:
+                await upload_files_to_page(s_page, attachment_paths, config)
+
+            # Baseline counts measured BEFORE dispatch
+            baseline_response_count = await _response_message_count(s_page, config)
+            baseline_user_message_count = await _visible_user_message_count(s_page, config)
+
+            await send_prompt_to_page(
+                s_page,
+                config,
+                prompt_to_send,
+                confirmation_timeout=min(15.0, require_remaining_timeout_sec()),
+                wait_for_attachment_ready=bool(
+                    (image_paths or seed_file_path or adaptive_prompt_file or attachment_paths) and config.get("name") == "ChatGPT"
+                ),
+                expected_user_marker=expected_user_marker,
+            )
+            if persist:
+                await _save_factory_url_when_ready(provider, req.session_id, s_page, min(20.0, require_remaining_timeout_sec()))
+            cleanup_temp_files()
+
+            # Handle SSE Streaming if requested
+            if req.stream:
+                streaming_resp = StreamingResponse(
+                    session_stream_generator(
                         s_page,
                         config,
-                        prompt_to_send,
-                        confirmation_timeout=min(15.0, require_remaining_timeout_sec()),
-                        wait_for_attachment_ready=bool(
-                            (image_paths or adaptive_prompt_file or attachment_paths) and config.get("name") == "ChatGPT"
-                        ),
-                    )
-                    if persist:
-                        await _save_factory_url_when_ready(provider, req.session_id, s_page, min(20.0, require_remaining_timeout_sec()))
-                    cleanup_temp_files()
-                    raw_output = await wait_for_completion(
-                        s_page,
-                        config,
+                        response_id,
+                        selected_model_name,
+                        provider=provider,
+                        session_id=req.session_id,
                         timeout=max(1, int(require_remaining_timeout_sec())),
                         submitted_prompt=prompt_to_send,
+                        baseline_response_count=baseline_response_count,
+                        baseline_user_message_count=baseline_user_message_count,
+                        expected_user_marker=expected_user_marker,
                         is_json_requested=is_json_requested,
-                    )
-                    if not raw_output:
-                        raise HTTPException(
-                            status_code=504,
-                            detail=(
-                                "Bridge không nhận được phản hồi từ giao diện web "
-                                "trong thời hạn của yêu cầu."
-                            ),
-                        )
-                    downloaded_files = []
-                    if req.expect_zip or ".zip" in raw_output.lower():
-                        downloaded_files = await trigger_chat_downloads_if_any(s_page, session_key, req.download_dir)
-                    conversation_url = _save_factory_url(provider, req.session_id, s_page, "after_completion") if persist else None
-                    clean_content, reasoning_content = extract_and_clean_output(raw_output, is_json_requested)
-                    msg_dict = {"role": "assistant", "content": clean_content}
-                    if reasoning_content:
-                        msg_dict["reasoning_content"] = reasoning_content
-                    return {
-                        "id": response_id,
-                        "object": "chat.completion",
-                        "created": int(time.time()),
-                        "model": req.model or provider,
-                        "provider": provider,
-                        "session_id": req.session_id,
-                        "conversation_url": conversation_url,
-                        "resumed": resumed,
-                        "downloaded_files": downloaded_files,
-                        "download_failures": list(session_download_failures.get(session_key, [])),
-                        "choices": [{
-                            "index": 0,
-                            "message": msg_dict,
-                            "finish_reason": "stop"
-                        }],
-                        "usage": {
-                            "prompt_tokens": len(prompt.split()),
-                            "completion_tokens": len(clean_content.split()),
-                            "total_tokens": len(prompt.split()) + len(clean_content.split())
-                        }
-                    }
-                finally:
-                    cleanup_temp_files()
-                    session_last_used[session_key] = time.time()
+                        prompt_token_count=len(prompt_to_send.split()),
+                        session_lock=s_lock,
+                        semaphore=sem,
+                        persist=persist,
+                        tools=req.tools,
+                        stream_options=req.stream_options,
+                        system_hash=current_sys_hash,
+                        session_key=session_key,
+                    ),
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                )
+                session_stream_transferred = True
+                return streaming_resp
+
+            raw_output = await wait_for_completion(
+                s_page,
+                config,
+                timeout=max(1, int(require_remaining_timeout_sec())),
+                submitted_prompt=prompt_to_send,
+                baseline_response_count=baseline_response_count,
+                baseline_user_message_count=baseline_user_message_count,
+                expected_user_marker=expected_user_marker,
+                is_json_requested=is_json_requested,
+            )
+            if not raw_output:
+                raise HTTPException(
+                    status_code=504,
+                    detail=(
+                        "Bridge không nhận được phản hồi từ giao diện web "
+                        "trong thời hạn của yêu cầu."
+                    ),
+                )
+            downloaded_files = []
+            if req.expect_zip or ".zip" in raw_output.lower():
+                downloaded_files = await trigger_chat_downloads_if_any(s_page, session_key, req.download_dir)
+            conversation_url = _save_factory_url(provider, req.session_id, s_page, "after_completion") if persist else None
+            clean_content, reasoning_content = extract_and_clean_output(raw_output, is_json_requested)
+
+            # Parse tool calls from model response
+            clean_content_final, parsed_tool_calls = parse_tool_calls_from_response(clean_content, req.tools)
+            finish_reason = "tool_calls" if parsed_tool_calls else "stop"
+
+            msg_dict: Dict[str, Any] = {"role": "assistant", "content": clean_content_final}
+            if parsed_tool_calls:
+                msg_dict["tool_calls"] = parsed_tool_calls
+            if reasoning_content:
+                msg_dict["reasoning_content"] = reasoning_content
+
+            # Record turn in NativeSessionTracker
+            native_tracker.record_turn(
+                req.session_id,
+                prompt_chars=len(prompt_to_send),
+                response_chars=len(clean_content),
+                system_hash=current_sys_hash,
+            )
+
+            return {
+                "id": response_id,
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": selected_model_name,
+                "provider": provider,
+                "session_id": req.session_id,
+                "conversation_url": conversation_url,
+                "resumed": resumed,
+                "downloaded_files": downloaded_files,
+                "download_failures": list(session_download_failures.get(session_key, [])),
+                "choices": [{
+                    "index": 0,
+                    "message": msg_dict,
+                    "finish_reason": finish_reason,
+                }],
+                "usage": {
+                    "prompt_tokens": len(prompt_to_send.split()),
+                    "completion_tokens": len(clean_content.split()),
+                    "total_tokens": len(prompt_to_send.split()) + len(clean_content.split()),
+                }
+            }
+        finally:
+            cleanup_temp_files()
+            session_last_used[session_key] = time.time()
+            if not session_stream_transferred:
+                if s_lock_acquired and s_lock.locked():
+                    s_lock.release()
+                if sem_acquired:
+                    sem.release()
 
     lock_acquired = False
     try:

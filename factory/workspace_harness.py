@@ -215,23 +215,50 @@ def apply_search_replace(
         }
 
     # 2. Khớp xấp xỉ khoảng trắng đầu/cuối dòng (Fuzzy Whitespace Match)
-    search_lines = [l.strip() for l in clean_search.splitlines() if l.strip()]
-    if not search_lines:
+    clean_search_trimmed = clean_search.strip("\r\n")
+    search_lines = [l.strip() for l in clean_search_trimmed.splitlines()]
+    if not search_lines or not any(l for l in search_lines):
         return {"success": False, "error": "Khối tìm kiếm rỗng."}
 
     content_lines = clean_content.splitlines(keepends=True)
     matched_start = -1
     matched_end = -1
 
-    for i in range(len(content_lines) - len(search_lines) + 1):
-        window = [content_lines[i + j].strip() for j in range(len(search_lines))]
+    # Thử 2a: Khớp toàn bộ số dòng (bao gồm các dòng trống tương ứng nếu có)
+    n_search = len(search_lines)
+    for i in range(len(content_lines) - n_search + 1):
+        window = [content_lines[i + j].strip() for j in range(n_search)]
         if window == search_lines:
             matched_start = i
-            matched_end = i + len(search_lines)
+            matched_end = i + n_search
             break
+
+    # Thử 2b: Khớp các dòng không rỗng (bỏ qua các dòng trống phát sinh thêm bên trong khối)
+    if matched_start == -1:
+        non_empty_search = [l for l in search_lines if l]
+        if non_empty_search:
+            for i in range(len(content_lines)):
+                if content_lines[i].strip() != non_empty_search[0]:
+                    continue
+                s_idx = 0
+                j = i
+                while j < len(content_lines) and s_idx < len(non_empty_search):
+                    c_line = content_lines[j].strip()
+                    if c_line:
+                        if c_line == non_empty_search[s_idx]:
+                            s_idx += 1
+                        else:
+                            break
+                    j += 1
+                if s_idx == len(non_empty_search):
+                    matched_start = i
+                    matched_end = j
+                    break
 
     if matched_start != -1:
         formatted_replace_lines = [r_line for r_line in clean_replace.splitlines(keepends=True)]
+        if not formatted_replace_lines and clean_replace:
+            formatted_replace_lines = [clean_replace]
         new_lines = content_lines[:matched_start] + formatted_replace_lines + content_lines[matched_end:]
         new_content = "".join(new_lines)
         with open(full_path, "w", encoding="utf-8") as f:
@@ -279,9 +306,13 @@ def filter_and_extract_patches(ai_response_text: str) -> List[Dict[str, Any]]:
     patches = []
     text = ai_response_text or ""
 
-    # Regex nhận diện đường dẫn file ở tiêu đề hoặc dòng chỉ định
+    # Regex nhận diện đường dẫn file ở tiêu đề hoặc dòng chỉ định (ví dụ: ### File: ..., <file path="...">, File: ...)
     file_header_pattern = re.compile(
         r"(?:^|\n)\s*(?:#+|//|/\*|\*\*|--)?\s*(?:File|Tệp|Tệp tin|Tạo file|CREATE_FILE|NEW_FILE|PATH):\s*[`'\"]?([a-zA-Z0-9_\-\./\\]+\.[a-zA-Z0-9]+)[`'\"]?",
+        re.IGNORECASE
+    )
+    xml_file_pattern = re.compile(
+        r"""<file\s+(?:path|name)=["']?([a-zA-Z0-9_\-\./\\]+\.[a-zA-Z0-9]+)["']?[^>]*>""",
         re.IGNORECASE
     )
 
@@ -294,27 +325,49 @@ def filter_and_extract_patches(ai_response_text: str) -> List[Dict[str, Any]]:
         code_content = m.group(2)
         start_idx = m.start()
 
-        # Kiểm tra xem ngay sau dấu ``` có ghi luôn tên file không (vd: ```dart lib/main.dart)
+        # Kiểm tra xem ngay sau dấu ``` có ghi luôn tên file không (vd: ```dart lib/main.dart hoặc ```dart file="lib/main.dart")
         detected_file = None
+        has_explicit_tag = False
+
         if " " in lang:
             parts = lang.split()
             lang = parts[0]
-            if "." in parts[-1]:
-                detected_file = parts[-1].strip()
+            for p in parts[1:]:
+                p_clean = p.strip().strip("'\"")
+                if p_clean.startswith("file=") or p_clean.startswith("path="):
+                    detected_file = p_clean.split("=", 1)[1].strip("'\"")
+                    has_explicit_tag = True
+                    break
+                elif "." in p_clean and "/" in p_clean:
+                    detected_file = p_clean
+                    has_explicit_tag = True
+                    break
 
         # Tìm dòng chỉ định File ngay trước khối code này (trong phạm vi 350 ký tự)
         if not detected_file:
             prefix_text = text[max(0, start_idx - 350):start_idx]
-            file_match_before = list(file_header_pattern.finditer(prefix_text))
-            if file_match_before:
-                detected_file = file_match_before[-1].group(1).strip()
+            xml_match_before = list(xml_file_pattern.finditer(prefix_text))
+            if xml_match_before:
+                detected_file = xml_match_before[-1].group(1).strip()
+                has_explicit_tag = True
+            else:
+                file_match_before = list(file_header_pattern.finditer(prefix_text))
+                if file_match_before:
+                    detected_file = file_match_before[-1].group(1).strip()
+                    has_explicit_tag = True
 
         # Nếu chưa có, tìm bên trong 3 dòng đầu tiên của code_content
         first_lines = code_content.strip().splitlines()[:3]
         for line in first_lines:
+            xml_m = xml_file_pattern.search(line)
+            if xml_m:
+                detected_file = xml_m.group(1).strip()
+                has_explicit_tag = True
+                break
             f_match = file_header_pattern.search(line)
             if f_match:
                 detected_file = f_match.group(1).strip()
+                has_explicit_tag = True
                 break
 
         # Làm sạch tiền tố số dòng dạng L0001: hoặc 1 | do AI sao chép từ giao diện
@@ -342,12 +395,17 @@ def filter_and_extract_patches(ai_response_text: str) -> List[Dict[str, Any]]:
                     "raw_code": raw_patch,
                 })
         else:
-            # Đây là toàn bộ file mới hoặc code trọn vẹn
+            # Đây là toàn bộ file mới hoặc code trọn vẹn — CHỈ coi là file overwrite khi có explicit tag (header hoặc file="...")
+            if not has_explicit_tag or not detected_file:
+                continue
+
             clean_file_body = cleaned_code.strip()
-            # Bỏ dòng header // File: ... ở đầu nếu có
+            # Bỏ dòng header // File: ... hoặc <file ...> ở đầu nếu có
             clean_lines = clean_file_body.splitlines()
-            if clean_lines and file_header_pattern.search(clean_lines[0]):
+            if clean_lines and (file_header_pattern.search(clean_lines[0]) or xml_file_pattern.search(clean_lines[0])):
                 clean_file_body = "\n".join(clean_lines[1:]).lstrip()
+            if clean_file_body.endswith("</file>"):
+                clean_file_body = clean_file_body[:-7].rstrip()
 
             patches.append({
                 "type": "file",

@@ -207,8 +207,7 @@ FILE_REQUEST_INSTRUCTION = (
     "```\n"
     "Công xưởng sẽ tự động đọc file trực tiếp từ đĩa và gửi lại nội dung kèm số dòng (L0001:) cho bạn ngay lập tức. "
     "Khi đã có nội dung cần sửa, bạn xuất bản vá chuẩn theo khối <<<<<<< SEARCH ... ======= ... >>>>>>> REPLACE "
-    "hoặc tạo file mới để Công xưởng tự động đồng bộ trực tiếp vào đĩa cho Chủ tịch. "
-    "Tuyệt đối không hỏi file .zip hoặc đòi nén zip."
+    "hoặc tạo file mới để Công xưởng tự động đồng bộ trực tiếp vào đĩa cho Chủ tịch."
 )
 ZIP_SANDBOX_INSTRUCTION = FILE_REQUEST_INSTRUCTION
 
@@ -1552,16 +1551,22 @@ class BuilderRunnerWorker:
             except Exception as r_err:
                 self.log("builder", f"⚠️ Remote Mac Builder không phản hồi ({r_err}), chuyển sang build cục bộ...")
 
-        if os.path.exists(self.build_workspace):
-            shutil.rmtree(self.build_workspace, ignore_errors=True)
-        os.makedirs(self.build_workspace, exist_ok=True)
+        staging_dir = os.path.join(self.project_dir, "staging_build", f"iter_{iteration}")
+        if os.path.exists(staging_dir):
+            shutil.rmtree(staging_dir, ignore_errors=True)
+        os.makedirs(staging_dir, exist_ok=True)
 
         with zipfile.ZipFile(full_zip_path, "r") as zf:
-            zf.extractall(self.build_workspace)
+            zf.extractall(staging_dir)
 
         rollback_dir = os.path.join(self.project_dir, "rollback_store")  # ngoài thư mục build: còn nguyên giữa các vòng
         os.makedirs(rollback_dir, exist_ok=True)
-        env_extra = {"FACTORY_BUILD_DIR": self.build_workspace, "FACTORY_ROLLBACK_DIR": rollback_dir, "FACTORY_ITERATION": str(iteration)}
+        env_extra = {
+            "FACTORY_BUILD_DIR": staging_dir,
+            "FACTORY_MAIN_DIR": self.build_workspace,
+            "FACTORY_ROLLBACK_DIR": rollback_dir,
+            "FACTORY_ITERATION": str(iteration),
+        }
         if target:
             env_extra["FACTORY_TARGET"] = target
             os.makedirs(os.path.dirname(target), exist_ok=True)  # thư mục cha của target có sẵn: lần deploy đầu không vấp ở bước đổi tên vào target
@@ -1570,7 +1575,6 @@ class BuilderRunnerWorker:
             ("BACKUP", backup_cmd, BUILD_INSTALL_TIMEOUT),
             ("INSTALL", install_cmd, BUILD_INSTALL_TIMEOUT),
             ("TEST/BUILD", test_cmd, BUILD_RUN_TIMEOUT),
-            ("DEPLOY", deploy_cmd, BUILD_RUN_TIMEOUT),
         ]
         combined_logs = []
         exit_code = 0
@@ -1579,7 +1583,7 @@ class BuilderRunnerWorker:
             if not (cmd and cmd.strip()):
                 continue
             self.log("builder", f"🧪 [Worker Thực thi] {label}: `{cmd}`")
-            code, out = await asyncio.to_thread(self._run_shell, cmd, self.build_workspace, limit, env_extra)
+            code, out = await asyncio.to_thread(self._run_shell, cmd, staging_dir, limit, env_extra)
             combined_logs.append(f"=== [{label}]: {cmd} (exit={code}) ===\n{out}")
             if code != 0:
                 exit_code, failed_step = code, label
@@ -1587,13 +1591,71 @@ class BuilderRunnerWorker:
 
         rolled_back = False
         rollback_ok: Optional[bool] = None
-        if exit_code != 0 and rollback_cmd and rollback_cmd.strip() and failed_step != "BACKUP":
-            rolled_back = True
-            self.log("builder", f"↩️ [Worker Thực thi] Bước {failed_step} lỗi: chạy rollback `{rollback_cmd}`")
-            code_r, out_r = await asyncio.to_thread(self._run_shell, rollback_cmd, self.build_workspace, BUILD_INSTALL_TIMEOUT, env_extra)
-            rollback_ok = code_r == 0
-            combined_logs.append(f"=== [ROLLBACK]: {rollback_cmd} (exit={code_r}) ===\n{out_r}")
-            combined_logs.append("ROLLBACK OK" if rollback_ok else "ROLLBACK FAILED")
+
+        if exit_code != 0:
+            # Build FAIL ở thư mục tạm: Giữ nguyên build_workspace và merged_source 100%
+            self.log(
+                "builder",
+                f"🛡️ [Staging Gate] Build FAIL ở thư mục tạm (staging_build/iter_{iteration}). Nhánh main (build_workspace) được giữ nguyên an toàn 100%!",
+            )
+            combined_logs.append(f"🛡️ [Staging Gate] Build FAIL ở bước {failed_step}. Main workspace không bị thay đổi.")
+            if rollback_cmd and rollback_cmd.strip() and failed_step != "BACKUP":
+                rolled_back = True
+                self.log("builder", f"↩️ [Worker Thực thi] Bước {failed_step} lỗi: chạy rollback `{rollback_cmd}` trong staging")
+                code_r, out_r = await asyncio.to_thread(self._run_shell, rollback_cmd, staging_dir, BUILD_INSTALL_TIMEOUT, env_extra)
+                rollback_ok = code_r == 0
+                combined_logs.append(f"=== [ROLLBACK]: {rollback_cmd} (exit={code_r}) ===\n{out_r}")
+                combined_logs.append("ROLLBACK OK" if rollback_ok else "ROLLBACK FAILED")
+        else:
+            # Build PASS: Đồng bộ từ staging_dir đè lên self.build_workspace (main) và merged_source, bảo tồn .git
+            def _sync_to_target(dst_dir: str):
+                os.makedirs(dst_dir, exist_ok=True)
+                for item in os.listdir(dst_dir):
+                    if item == ".git":
+                        continue
+                    p = os.path.join(dst_dir, item)
+                    if os.path.isdir(p) and not os.path.islink(p):
+                        shutil.rmtree(p, ignore_errors=True)
+                    else:
+                        try:
+                            os.remove(p)
+                        except OSError:
+                            pass
+                shutil.copytree(staging_dir, dst_dir, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git"))
+
+            _sync_to_target(self.build_workspace)
+            merged_dir = os.path.join(self.project_dir, "merged_source")
+            _sync_to_target(merged_dir)
+
+            # Git commit trên nhánh main nếu có git
+            try:
+                workspace_harness.git_init_workspace(self.build_workspace)
+                workspace_harness.git_commit(self.build_workspace, f"Build #{iteration} PASSED", author_role="Worker Thực thi")
+            except Exception as g_err:
+                self.log("builder", f"⚠️ [Git Commit] Không tạo được commit: {g_err}")
+
+            self.log(
+                "builder",
+                f"✅ [Staging Gate] Build PASS! Đã đồng bộ bản build #{iteration} từ thư mục tạm đè lên main (build_workspace).",
+            )
+            combined_logs.append(f"✅ [Staging Gate] Build PASS! Đã đồng bộ bản build #{iteration} lên main.")
+
+            # Chạy DEPLOY nếu có
+            if deploy_cmd and deploy_cmd.strip():
+                self.log("builder", f"🧪 [Worker Thực thi] DEPLOY: `{deploy_cmd}`")
+                deploy_env = dict(env_extra)
+                deploy_env["FACTORY_BUILD_DIR"] = self.build_workspace
+                code_dep, out_dep = await asyncio.to_thread(self._run_shell, deploy_cmd, self.build_workspace, BUILD_RUN_TIMEOUT, deploy_env)
+                combined_logs.append(f"=== [DEPLOY]: {deploy_cmd} (exit={code_dep}) ===\n{out_dep}")
+                if code_dep != 0:
+                    exit_code, failed_step = code_dep, "DEPLOY"
+                    if rollback_cmd and rollback_cmd.strip():
+                        rolled_back = True
+                        self.log("builder", f"↩️ [Worker Thực thi] Bước DEPLOY lỗi: chạy rollback `{rollback_cmd}` trên main")
+                        code_r, out_r = await asyncio.to_thread(self._run_shell, rollback_cmd, self.build_workspace, BUILD_INSTALL_TIMEOUT, deploy_env)
+                        rollback_ok = code_r == 0
+                        combined_logs.append(f"=== [ROLLBACK]: {rollback_cmd} (exit={code_r}) ===\n{out_r}")
+                        combined_logs.append("ROLLBACK OK" if rollback_ok else "ROLLBACK FAILED")
 
         passed = exit_code == 0
         collected: Dict[str, Any] = {"files": [], "zip": None}
@@ -2088,9 +2150,16 @@ class FactoryProject:
             DISPATCH_INSTRUCTION,
             file_access_instruction(kwargs.get("backend")),
         ]
-        codebase_ctx = self.build_existing_codebase_context(max_chars=6000)
-        if codebase_ctx:
-            system_prompts.append(codebase_ctx)
+        has_zip = bool(
+            self.threads.get("director", {}).get("had_zip")
+            or self.latest_source_zip()
+            or attachments
+            or os.path.isfile(os.path.join(self.project_dir, "director_upload", "project_source.zip"))
+        )
+        if not (kwargs.get("backend") == "chatgpt" and has_zip):
+            codebase_ctx = self.build_existing_codebase_context(max_chars=6000)
+            if codebase_ctx:
+                system_prompts.append(codebase_ctx)
 
         resp = await self.ask_with_files(
             "director",
@@ -2957,6 +3026,14 @@ class FactoryProject:
             original = os.path.join(self.project_dir, "original_source.zip")
             if os.path.abspath(source_path) != os.path.abspath(original):
                 shutil.copy2(source_path, original)
+
+            # Đảm bảo director_upload/project_source.zip luôn sẵn sàng cho Whole-ZIP mode
+            outbox = os.path.join(self.project_dir, "director_upload")
+            os.makedirs(outbox, exist_ok=True)
+            director_zip = os.path.join(outbox, "project_source.zip")
+            shutil.copy2(original, director_zip)
+            ensure_context_files(director_zip)
+            self.threads.setdefault("director", {"gen": 1, "seeded": False, "chars": 0})["had_zip"] = True
             with zipfile.ZipFile(source_path, "r") as zf:
                 # Phát hiện nếu tất cả file nằm trong 1 thư mục gốc duy nhất thì lược bỏ prefix đó
                 members = [m for m in zf.namelist() if not m.endswith("/") and "__MACOSX" not in m]
@@ -3222,7 +3299,7 @@ class FactoryProject:
             if res.get("content"):
                 file_contexts.append(f"--- FILE: {p} ---\n{res.get('content')}")
 
-        role_info = ROLE_CATALOG.get(role_id) or {"name": "Kỹ sư", "title": "Kỹ sư chuyên trách"}
+        role_info = COUNCIL_PERSONAS.get(role_id, COUNCIL_PERSONAS["director"])
         prompt = (
             f"Bạn là {role_info.get('name')} ({role_info.get('title')}).\n"
             f"Lệnh kiểm thử build `{cmd}` thất bại (Exit code {exit_code}) tại vòng tự sửa #{attempt}.\n\n"
@@ -3841,7 +3918,8 @@ class FactoryProject:
                     disk_hits = workspace_harness.search_code(ws, keyword, max_results=SEARCH_MAX_HITS)
                     total = len(disk_hits)
                     for hit in disk_hits:
-                        shown.append(f"{hit['file']}:{hit['line']}: {hit['content'][:160]}")
+                        content_snippet = hit.get("text", hit.get("content", ""))[:160]
+                        shown.append(f"{hit['file']}:{hit['line']}: {content_snippet}")
                 except Exception:
                     pass
 
@@ -4267,7 +4345,7 @@ class FactoryProject:
 
                 code_ctx = self.build_existing_codebase_context(max_chars=6000)
                 if code_ctx and persona_key == "director":
-                    code_ctx += "\n(Toàn bộ file trên đã có sẵn trên đĩa máy chủ. Khi cần đọc nội dung chi tiết file nào, hãy xuất khối xem_file chứa đường dẫn file; Công xưởng sẽ đọc từ đĩa và gửi lại kèm số dòng L0001: ngay lập tức. Tuyệt đối không hỏi file .zip.)"
+                    code_ctx += "\n(Toàn bộ file trên đã có sẵn trên đĩa máy chủ. Khi cần đọc nội dung chi tiết file nào, hãy xuất khối xem_file chứa đường dẫn file; Công xưởng sẽ đọc từ đĩa và gửi lại kèm số dòng L0001: ngay lập tức.)"
                 reply_text = None
                 reasoning_text = None
                 try:

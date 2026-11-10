@@ -14,15 +14,17 @@ Hệ thống Công xưởng Phần mềm AI Tự Vận Hành (Self-hosted AI Sof
    - **Hội đồng 3 Cố vấn:** Tranh biện đa chiều (Ủng hộ, Phản biện, Dung hòa).
    - **Giao liên & Tester:** Đóng gói bản xuất và chạy kiểm thử tự động.
 
-2. **Workspace Harness Engine:**
+2. **Workspace Harness Engine & Staging Gate:**
+   - **Cơ chế Staging Gate (Bảo vệ 100%):** Mọi phiên bản code được trích xuất và build/test trong thư mục cách ly (`staging_build/iter_N`). Chỉ khi build PASS mới đồng bộ đè lên nhánh chính (`build_workspace`), nếu build FAIL nhánh chính được giữ nguyên vẹn tuyệt đối.
+   - **Vá code thông minh (Fuzzy Patch Matching):** Tự động phát hiện và xử lý chênh lệch dòng trống, khoảng trắng khi AI áp dụng khối `SEARCH/REPLACE`.
    - Tự động nhận diện cấu trúc file từ AI, tự sinh toàn bộ thư mục lồng nhau (`os.makedirs`).
-   - Ghi mã nguồn sạch trực tiếp vào ổ đĩa, loại bỏ hoàn toàn các đoạn chat râu ria.
    - Tự động lưu vết lịch sử phiên bản qua Git Commit.
 
-3. **Đa Nguồn AI (ChatGPT & DeepSeek):**
+3. **Đa Nguồn AI & Native API Tool Calling:**
    - **ChatGPT Web Bridge:** Kết nối trực tiếp qua trình duyệt tới ChatGPT Web (`GPT-6`, `GPT-5.6 Sol`...).
    - **DeepSeek Web Bridge:** Kết nối miễn phí qua `chat.deepseek.com`, hỗ trợ `deepseek-chat` (V3) và `deepseek-reasoner` (R1 DeepThink).
    - **DeepSeek API Chính Thức:** Kết nối siêu tốc qua `api.deepseek.com`, quản lý và kiểm tra kết nối API Key trực tiếp trên giao diện Web.
+   - **Native OpenAI Tool Calling Adapter:** Hỗ trợ chuẩn `tools` / `functions` của OpenAI, tự bóc tách `<tool_call>` thành đối tượng gọi hàm, hỗ trợ SSE streaming và tự động xoay vòng phiên (`auto-rotation`) chống tràn token.
 
 4. **Trải nghiệm Mobile & Remote Terminal:**
    - Giao diện Web PWA tối ưu mượt mà cho điện thoại (iPhone, Android).
@@ -74,6 +76,7 @@ cd fkm-software-factory
 
 | Thao tác | Lệnh thực hiện |
 | :--- | :--- |
+| **Cập nhật & Khởi động lại** | `./scripts/update.sh` |
 | **Khởi động nền (Daemon Mode)** | `./scripts/start.sh --daemon` |
 | **Kiểm tra trạng thái hệ thống** | `./scripts/status.sh` |
 | **Dừng toàn bộ dịch vụ** | `./scripts/stop.sh` |
