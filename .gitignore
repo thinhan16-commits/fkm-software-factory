@@ -1,0 +1,45 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual Environment
+.venv/
+venv/
+env/
+ENV/
+
+# Configuration & Secrets
+.env
+*.local.env
+
+# User Data & Projects Created By Factory
+projects/
+downloads/
+merged_source/
+director_inbox/
+global_llm_settings.json
+role_llm_settings.json
+
+# Browser Profiles & Authentication State (DO NOT COMMIT COOKIES / LOGINS)
+bridge/profiles/
+profiles/
+profiles_factory/
+*.auth
+*.cookies
+*.session
+
+# Logs & PIDs
+logs/
+*.log
+*.pid
+
+# OS-specific
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db

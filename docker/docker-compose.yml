@@ -1,0 +1,21 @@
+version: "3.8"
+
+services:
+  software-factory:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: fkm-software-factory
+    restart: unless-stopped
+    ports:
+      - "8090:8090"
+      - "8001:8001"
+    environment:
+      - FACTORY_PORT=8090
+      - FACTORY_BRIDGE_PORT=8001
+      - BRIDGE_PORT=8001
+    volumes:
+      - ../projects:/app/projects
+      - ../downloads:/app/downloads
+      - ../bridge/profiles:/app/bridge/profiles
+      - ../logs:/app/logs
