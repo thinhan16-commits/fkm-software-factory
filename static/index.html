@@ -8229,9 +8229,24 @@
     const p = (globalLlmData.providers || []).find(x => x.id === id);
     if (!p || !p.available) return;
     selectedGlobalBackend = id;
+
+    // Tự động chuyển model mặc định tương ứng khi đổi nhà cung cấp
+    if (id.startsWith("deepseek")) {
+      if (!selectedGlobalModel || selectedGlobalModel.startsWith("GPT") || selectedGlobalModel.includes("chatgpt")) {
+        selectedGlobalModel = "deepseek-chat";
+        selectedGlobalEffort = "none";
+      }
+    } else if (id === "chatgpt") {
+      if (!selectedGlobalModel || selectedGlobalModel.startsWith("deepseek")) {
+        selectedGlobalModel = "GPT-6";
+        selectedGlobalEffort = "high";
+      }
+    }
+
     renderGlobalProviderList(globalLlmData.providers, selectedGlobalBackend);
     renderProviderDetailBox(selectedGlobalBackend);
-    await loadGlobalModelsForBackend(selectedGlobalBackend, "");
+    renderGlobalEffortButtons(globalLlmData.efforts, selectedGlobalEffort);
+    await loadGlobalModelsForBackend(selectedGlobalBackend, selectedGlobalModel);
   }
 
   async function saveGlobalLlmSettings() {
