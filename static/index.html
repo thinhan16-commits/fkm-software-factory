@@ -3217,22 +3217,34 @@
       display: none;
       position: fixed;
       inset: 0;
-      background: rgba(0, 0, 0, 0.72);
-      backdrop-filter: blur(5px);
+      background: rgba(0, 0, 0, 0.78);
+      backdrop-filter: blur(6px);
       z-index: 999;
       align-items: center;
       justify-content: center;
       padding: 16px;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      box-sizing: border-box;
     }
     .modal-backdrop.open { display: flex; }
     .modal-card {
       width: 100%;
-      max-width: 520px;
+      max-width: 540px;
+      max-height: calc(100dvh - 32px);
+      max-height: calc(100vh - 32px);
+      display: flex;
+      flex-direction: column;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      overscroll-behavior: contain;
       background: var(--bg-card);
       border: 1px solid var(--border-strong);
       border-radius: 20px;
       padding: 20px 22px;
       box-shadow: var(--shadow-lg);
+      box-sizing: border-box;
+      margin: auto;
     }
     .modal-card h3 { font-size: 16px; margin-bottom: 8px; }
     .modal-card p { font-size: 13px; color: var(--text-sub); margin-bottom: 12px; }
@@ -3800,6 +3812,20 @@
       }
       .pill-text { display: none; }
 
+      /* MODAL CHUNG TRÊN MOBILE: BẢO ĐẢM CUỘN VỪA KHỚP 100% MÀN HÌNH */
+      .modal-backdrop {
+        padding: 10px !important;
+        align-items: center !important;
+      }
+      .modal-card {
+        max-height: 92dvh !important;
+        max-height: 92vh !important;
+        padding: 16px 14px !important;
+        border-radius: 18px !important;
+        width: 100% !important;
+        box-sizing: border-box !important;
+      }
+
       /* HARNESS & BUILD MODAL TRÊN MOBILE */
       .modal-backdrop#harnessModal,
       .modal-backdrop#buildModal {
@@ -4053,6 +4079,18 @@
       white-space: nowrap;
     }
     body.mobile-preview-mode .pill-text { display: none; }
+    body.mobile-preview-mode .modal-backdrop {
+      padding: 10px !important;
+      align-items: center !important;
+    }
+    body.mobile-preview-mode .modal-card {
+      max-height: 92dvh !important;
+      max-height: 92vh !important;
+      padding: 16px 14px !important;
+      border-radius: 18px !important;
+      width: 100% !important;
+      box-sizing: border-box !important;
+    }
     body.mobile-preview-mode .modal-backdrop#harnessModal,
     body.mobile-preview-mode .modal-backdrop#buildModal {
       padding: 0 !important;
@@ -4977,57 +5015,65 @@
 
 <!-- MODAL CÀI ĐẶT HỆ THỐNG AI (PROVIDER, MODEL & MỨC SUY LUẬN MẶC ĐỊNH) -->
 <div class="modal-backdrop" id="globalLlmSettingsModal" onclick="if (event.target === this) closeGlobalLlmSettingsModal()">
-  <div class="modal-card" style="max-width:580px;">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-      <h3 style="margin:0;display:flex;align-items:center;gap:8px;">
-        <span>⚙️</span><span>Cài Đặt Hệ Thống AI &amp; Model</span>
-      </h3>
-      <button class="icon-btn-ghost" onclick="closeGlobalLlmSettingsModal()" title="Đóng">✕</button>
-    </div>
-    <p style="font-size:12px;color:var(--text-sub);margin-bottom:12px;">
-      Chọn Nhà cung cấp, Mô hình (Model) và Mức suy luận mặc định cho toàn bộ nhân sự AI.
-    </p>
-
-    <!-- MỤC 1: CHỌN PROVIDER MẶC ĐỊNH -->
-    <div style="font-size:12.5px;font-weight:700;color:#e2e8f0;margin-bottom:6px;">
-      1. Nhà Cung Cấp AI (Provider):
-    </div>
-    <div class="provider-card-grid" id="globalProviderList">
-      <div style="padding:16px;text-align:center;color:var(--text-sub);">Đang tải danh sách nhà cung cấp...</div>
-    </div>
-
-    <!-- KHỐI CẤU HÌNH CHI TIẾT PROVIDER (API KEY HOẶC WEB STATUS) -->
-    <div id="globalProviderDetailBox" style="margin-top:10px;"></div>
-
-    <!-- MỤC 2: CHỌN MODEL AI -->
-    <div style="font-size:12.5px;font-weight:700;color:#e2e8f0;margin:12px 0 6px;">
-      2. Mô hình AI (Model):
-    </div>
-    <div id="globalModelBox" style="background:#12141c;border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:12px;margin-bottom:12px;">
-      <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px;">
-        <select id="globalModelSelect" class="form-input" style="flex:1;background:#1a1c26;color:#fff;border:1px solid rgba(255,255,255,0.15);padding:8px 12px;border-radius:8px;font-size:13px;" onchange="onGlobalModelSelectChange(this.value)">
-          <option value="">Đang tải danh sách model...</option>
-        </select>
-        <button type="button" class="action-pill" onclick="refreshGlobalModels()" title="Tải lại danh sách model từ server">↻</button>
+  <div class="modal-card" style="max-width:580px;display:flex;flex-direction:column;max-height:92dvh;max-height:92vh;padding:0;overflow:hidden;box-shadow:0 24px 60px rgba(0,0,0,0.8);">
+    
+    <!-- HEADER CỐ ĐỊNH -->
+    <div style="padding:16px 20px 10px;border-bottom:1px solid rgba(255,255,255,0.08);background:var(--bg-card);flex-shrink:0;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+        <h3 style="margin:0;display:flex;align-items:center;gap:8px;font-size:16px;">
+          <span>⚙️</span><span>Cài Đặt Hệ Thống AI &amp; Model</span>
+        </h3>
+        <button class="icon-btn-ghost" onclick="closeGlobalLlmSettingsModal()" title="Đóng">✕</button>
       </div>
-      <div id="globalCustomModelWrap" style="display:none;margin-top:6px;">
-        <input type="text" id="globalCustomModelInput" class="form-input" placeholder="Nhập tên model tùy chỉnh (ví dụ: o1, deepseek-reasoner, gpt-4o)..." style="width:100%;background:#1a1c26;color:#fff;border:1px solid rgba(255,255,255,0.15);padding:8px 12px;border-radius:8px;font-size:12.5px;" oninput="selectedGlobalModel = this.value.trim()" />
+      <p style="font-size:12px;color:var(--text-sub);margin:0;">
+        Chọn Nhà cung cấp, Mô hình (Model) và Mức suy luận mặc định cho toàn bộ nhân sự AI.
+      </p>
+    </div>
+
+    <!-- BODY CUỘN MƯỢT MÀ -->
+    <div style="padding:14px 20px;overflow-y:auto;flex:1 1 auto;min-height:0;-webkit-overflow-scrolling:touch;">
+      <!-- MỤC 1: CHỌN PROVIDER MẶC ĐỊNH -->
+      <div style="font-size:12.5px;font-weight:700;color:#e2e8f0;margin-bottom:6px;">
+        1. Nhà Cung Cấp AI (Provider):
       </div>
-      <div style="font-size:11.5px;color:var(--text-sub);margin-top:4px;">
-        Mô hình đang chọn: <strong id="globalCurrentModelLabel" style="color:#c4b5fd;">GPT-6</strong>
+      <div class="provider-card-grid" id="globalProviderList">
+        <div style="padding:16px;text-align:center;color:var(--text-sub);">Đang tải danh sách nhà cung cấp...</div>
+      </div>
+
+      <!-- KHỐI CẤU HÌNH CHI TIẾT PROVIDER (API KEY HOẶC WEB STATUS) -->
+      <div id="globalProviderDetailBox" style="margin-top:10px;"></div>
+
+      <!-- MỤC 2: CHỌN MODEL AI -->
+      <div style="font-size:12.5px;font-weight:700;color:#e2e8f0;margin:12px 0 6px;">
+        2. Mô hình AI (Model):
+      </div>
+      <div id="globalModelBox" style="background:#12141c;border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:12px;margin-bottom:12px;">
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px;">
+          <select id="globalModelSelect" class="form-input" style="flex:1;background:#1a1c26;color:#fff;border:1px solid rgba(255,255,255,0.15);padding:8px 12px;border-radius:8px;font-size:13px;" onchange="onGlobalModelSelectChange(this.value)">
+            <option value="">Đang tải danh sách model...</option>
+          </select>
+          <button type="button" class="action-pill" onclick="refreshGlobalModels()" title="Tải lại danh sách model từ server">↻</button>
+        </div>
+        <div id="globalCustomModelWrap" style="display:none;margin-top:6px;">
+          <input type="text" id="globalCustomModelInput" class="form-input" placeholder="Nhập tên model tùy chỉnh (ví dụ: o1, deepseek-reasoner, gpt-4o)..." style="width:100%;background:#1a1c26;color:#fff;border:1px solid rgba(255,255,255,0.15);padding:8px 12px;border-radius:8px;font-size:12.5px;" oninput="selectedGlobalModel = this.value.trim()" />
+        </div>
+        <div style="font-size:11.5px;color:var(--text-sub);margin-top:4px;">
+          Mô hình đang chọn: <strong id="globalCurrentModelLabel" style="color:#c4b5fd;">GPT-6</strong>
+        </div>
+      </div>
+
+      <!-- MỤC 3: MỨC SUY LUẬN MẶC ĐỊNH (REASONING EFFORT) -->
+      <div style="font-size:12.5px;font-weight:700;color:#e2e8f0;margin:12px 0 6px;">
+        3. Mức Suy Luận (Reasoning Effort):
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(110px, 1fr));gap:8px;" id="globalEffortButtons">
+        <!-- Được render động bởi renderGlobalEffortButtons -->
       </div>
     </div>
 
-    <!-- MỤC 3: MỨC SUY LUẬN MẶC ĐỊNH (REASONING EFFORT) -->
-    <div style="font-size:12.5px;font-weight:700;color:#e2e8f0;margin:12px 0 6px;">
-      3. Mức Suy Luận (Reasoning Effort):
-    </div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(110px, 1fr));gap:8px;" id="globalEffortButtons">
-      <!-- Được render động bởi renderGlobalEffortButtons -->
-    </div>
-
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:18px;border-top:1px solid rgba(255,255,255,0.08);padding-top:12px;">
-      <button type="button" class="action-pill" style="font-size:11.5px;color:#94a3b8;" onclick="forcePurgeAppCache()" title="Xóa toàn bộ cache Service Worker và tải lại mới 100%">🔄 Xóa Cache &amp; Tải Lại</button>
+    <!-- FOOTER CỐ ĐỊNH Ở CHÂN MODAL: LUÔN NHÌN THẤY NÚT LƯU -->
+    <div style="padding:12px 20px;border-top:1px solid rgba(255,255,255,0.1);background:#16171f;flex-shrink:0;display:flex;justify-content:space-between;align-items:center;">
+      <button type="button" class="action-pill" style="font-size:11.5px;color:#94a3b8;" onclick="forcePurgeAppCache()" title="Xóa toàn bộ cache Service Worker và tải lại mới 100%">🔄 Xóa Cache</button>
       <div style="display:flex;gap:8px;">
         <button type="button" class="action-pill" onclick="closeGlobalLlmSettingsModal()">Hủy</button>
         <button type="button" class="action-pill primary-purple" onclick="saveGlobalLlmSettings()">💾 Lưu Mặc Định</button>
@@ -10709,7 +10755,7 @@
 <script>
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", () => {
-      navigator.serviceWorker.register("/sw.js?v=30").then((reg) => {
+      navigator.serviceWorker.register("/sw.js?v=32").then((reg) => {
         try { reg.update(); } catch (e) {}
       }).catch((err) => {
         console.warn("[SW] Registration error:", err);
