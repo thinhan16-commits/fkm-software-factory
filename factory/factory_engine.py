@@ -17,17 +17,62 @@ from typing import Dict, List, Any, Optional
 
 import workspace_harness
 
-# Bridge riêng của factory (cổng 8001, hồ sơ trình duyệt riêng), tách khỏi bridge 8000 dùng chung với AVS và Codex
-BRIDGE_PORT = int(os.environ.get("FACTORY_BRIDGE_PORT", "8001"))
-BRIDGE_HOST = os.environ.get("FACTORY_BRIDGE_HOST", "127.0.0.1")
-BRIDGE_API_URL = f"http://{BRIDGE_HOST}:{BRIDGE_PORT}/v1/chat/completions"
-BRIDGE_CLOSE_URL = f"http://{BRIDGE_HOST}:{BRIDGE_PORT}/v1/factory/sessions/close"
 _CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 if os.path.basename(_CURRENT_DIR) == "factory":
     _DEFAULT_ROOT = os.path.dirname(_CURRENT_DIR)
 else:
     _DEFAULT_ROOT = _CURRENT_DIR
 FACTORY_ROOT = os.environ.get("FACTORY_ROOT", _DEFAULT_ROOT)
+
+def _load_factory_env():
+    env_file = os.path.join(FACTORY_ROOT, ".env")
+    if os.path.isfile(env_file):
+        try:
+            with open(env_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        k, v = k.strip(), v.strip().strip("'\"")
+                        if k and k not in os.environ:
+                            os.environ[k] = v
+        except Exception:
+            pass
+
+_load_factory_env()
+
+def _detect_bridge_host() -> str:
+    custom_host = os.environ.get("FACTORY_BRIDGE_HOST", "").strip()
+    if custom_host:
+        return custom_host
+
+    port = int(os.environ.get("FACTORY_BRIDGE_PORT", "8001"))
+    # 1. Kiểm tra nếu local 127.0.0.1:8001 đang chạy
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/health")
+        with urllib.request.urlopen(req, timeout=0.6) as r:
+            if r.status == 200:
+                return "127.0.0.1"
+    except Exception:
+        pass
+
+    # 2. Nếu local không chạy, tự động phát hiện Mac Mini 24/7 (LAN 192.168.1.24 hoặc Tailscale)
+    for candidate in ("192.168.1.24", "100.83.24.41", "mac-mini-ca-dang.tail3157c3.ts.net"):
+        try:
+            req = urllib.request.Request(f"http://{candidate}:{port}/health")
+            with urllib.request.urlopen(req, timeout=0.8) as r:
+                if r.status == 200:
+                    return candidate
+        except Exception:
+            pass
+
+    return "127.0.0.1"
+
+# Bridge riêng của factory (cổng 8001, hồ sơ trình duyệt riêng), tách khỏi bridge 8000 dùng chung với AVS và Codex
+BRIDGE_PORT = int(os.environ.get("FACTORY_BRIDGE_PORT", "8001"))
+BRIDGE_HOST = _detect_bridge_host()
+BRIDGE_API_URL = f"http://{BRIDGE_HOST}:{BRIDGE_PORT}/v1/chat/completions"
+BRIDGE_CLOSE_URL = f"http://{BRIDGE_HOST}:{BRIDGE_PORT}/v1/factory/sessions/close"
 PROJECTS_DIR = os.path.join(FACTORY_ROOT, "projects")
 # Lịch sử và trạng thái của từng dự án, lưu ngay trong thư mục của dự án để khởi động lại server vẫn còn
 PROJECT_STATE_FILE = "project_state.json"

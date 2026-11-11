@@ -38,25 +38,31 @@ fi
 
 mkdir -p "$ROOT_DIR/logs"
 
-# 1. Khởi chạy Bridge nếu chưa chạy
-echo -e "${CYAN}🔍 Kiểm tra Multi-Provider Web Bridge (Cổng :$BRIDGE_PORT)...${NC}"
-if lsof -nP -iTCP:"$BRIDGE_PORT" -sTCP:LISTEN -t >/dev/null 2>&1; then
-    echo -e "${GREEN}✓ Bridge đã đang chạy trên cổng :$BRIDGE_PORT.${NC}"
+# 1. Khởi chạy Bridge nếu cần (hoặc dùng Bridge từ xa trên Mac Mini)
+if [ -n "$FACTORY_BRIDGE_HOST" ] && [ "$FACTORY_BRIDGE_HOST" != "127.0.0.1" ] && [ "$FACTORY_BRIDGE_HOST" != "localhost" ]; then
+    echo -e "${GREEN}✓ Sử dụng Multi-Provider Web Bridge từ xa trên Mac Mini: http://$FACTORY_BRIDGE_HOST:$BRIDGE_PORT${NC}"
+elif [ "$START_LOCAL_BRIDGE" = "0" ] || [ "$START_LOCAL_BRIDGE" = "false" ] || [ "$NO_BRIDGE" = "1" ]; then
+    echo -e "${YELLOW}ℹ️ Bỏ qua khởi động Bridge cục bộ trên máy này (theo cấu hình START_LOCAL_BRIDGE=false).${NC}"
 else
-    echo -e "${YELLOW}⚡ Đang khởi động Bridge trên cổng :$BRIDGE_PORT...${NC}"
-    (
-        cd "$ROOT_DIR/bridge"
-        export PYTHONPATH="$ROOT_DIR/bridge:$ROOT_DIR"
-        export BRIDGE_PORT="$BRIDGE_PORT"
-        export BRIDGE_PROFILES_DIR="$ROOT_DIR/bridge/profiles"
-        nohup "$VENV_PYTHON" server.py >> "$ROOT_DIR/logs/bridge.log" 2>&1 &
-        echo $! > "$ROOT_DIR/logs/bridge.pid"
-    )
-    sleep 2
+    echo -e "${CYAN}🔍 Kiểm tra Multi-Provider Web Bridge (Cổng :$BRIDGE_PORT)...${NC}"
     if lsof -nP -iTCP:"$BRIDGE_PORT" -sTCP:LISTEN -t >/dev/null 2>&1; then
-        echo -e "${GREEN}✓ Bridge đã khởi động thành công (PID: $(cat "$ROOT_DIR/logs/bridge.pid 2>/dev/null || echo '?'))!${NC}"
+        echo -e "${GREEN}✓ Bridge đã đang chạy trên cổng :$BRIDGE_PORT.${NC}"
     else
-        echo -e "${YELLOW}⚠️ Bridge đang khởi động nền... Xem log tại: logs/bridge.log${NC}"
+        echo -e "${YELLOW}⚡ Đang khởi động Bridge trên cổng :$BRIDGE_PORT...${NC}"
+        (
+            cd "$ROOT_DIR/bridge"
+            export PYTHONPATH="$ROOT_DIR/bridge:$ROOT_DIR"
+            export BRIDGE_PORT="$BRIDGE_PORT"
+            export BRIDGE_PROFILES_DIR="$ROOT_DIR/bridge/profiles"
+            nohup "$VENV_PYTHON" server.py >> "$ROOT_DIR/logs/bridge.log" 2>&1 &
+            echo $! > "$ROOT_DIR/logs/bridge.pid"
+        )
+        sleep 2
+        if lsof -nP -iTCP:"$BRIDGE_PORT" -sTCP:LISTEN -t >/dev/null 2>&1; then
+            echo -e "${GREEN}✓ Bridge đã khởi động thành công (PID: $(cat "$ROOT_DIR/logs/bridge.pid 2>/dev/null || echo '?'))!${NC}"
+        else
+            echo -e "${YELLOW}⚠️ Bridge đang khởi động nền... Xem log tại: logs/bridge.log${NC}"
+        fi
     fi
 fi
 

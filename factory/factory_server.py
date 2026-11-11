@@ -26,6 +26,7 @@ from factory_engine import (
     FACTORY_ROOT,
     PROJECTS_DIR,
     BRIDGE_PORT,
+    BRIDGE_HOST,
     DOWNLOADS_DIR,
     COUNCIL_PERSONAS,
     DEEPSEEK_MODELS,
@@ -230,7 +231,6 @@ async def get_personas():
     return {"personas": list(COUNCIL_PERSONAS.values())}
 
 
-BRIDGE_HOST = os.environ.get("FACTORY_BRIDGE_HOST", "127.0.0.1")
 BRIDGE_BASE_URL = f"http://{BRIDGE_HOST}:{BRIDGE_PORT}"
 
 def resolve_home_dir():
