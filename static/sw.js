@@ -1,7 +1,7 @@
 // FKM Software Factory - Service Worker v32
 // Tự động giải phóng cache cũ, luôn ưu tiên tải giao diện mới nhất từ server
 
-const CACHE_NAME = "fkm-factory-shell-v32";
+const CACHE_NAME = "fkm-factory-shell-v33";
 const SHELL_ASSETS = [
   "/",
   "/static/icons/icon-192.png",

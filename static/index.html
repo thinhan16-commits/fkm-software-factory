@@ -4905,8 +4905,8 @@
   <div class="attach-menu-item" onclick="handlePlusUploadZip()">
     <span class="attach-item-icon"><svg viewBox="0 0 24 24" class="mat-icon" fill="currentColor"><path d="M20 6h-8l-2-2H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm-6 10h-2v-2h2v2zm0-4h-2v-2h2v2zm0-4h-2V6h2v2zm2 8h-2v-2h2v2zm0-4h-2v-2h2v2zm0-4h-2V6h2v2z"/></svg></span>
     <div class="attach-item-info">
-      <div class="attach-item-title">Nạp file nén .ZIP</div>
-      <div class="attach-item-sub">Giải nén trực tiếp vào thư mục làm việc</div>
+      <div class="attach-item-title">Nạp gói mã nguồn .ZIP (Whole-ZIP)</div>
+      <div class="attach-item-sub">Nạp nguyên file ZIP gửi trực tiếp cho AI (GPT) &amp; Workspace</div>
     </div>
   </div>
   <div class="attach-menu-item" onclick="handlePlusOpenHarness()">
@@ -10755,7 +10755,7 @@
 <script>
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", () => {
-      navigator.serviceWorker.register("/sw.js?v=32").then((reg) => {
+      navigator.serviceWorker.register("/sw.js?v=33").then((reg) => {
         try { reg.update(); } catch (e) {}
       }).catch((err) => {
         console.warn("[SW] Registration error:", err);
